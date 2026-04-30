@@ -664,7 +664,7 @@ class TestDoctorLLMMatrix:
 
     def test_anthropic_ok(self, monkeypatch):
         monkeypatch.setenv("LLM_PROVIDER", "anthropic")
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy-key")
         ok, msg = self._check()
         assert ok and "Anthropic" in msg
 
