@@ -858,18 +858,25 @@ def validate_pdf_header(file_path):
         return False, f"Unknown ({header[:4].hex()})"
 
 
-def make_unique_path(output_dir, filename):
-    """Generate unique file path with (N) suffix if file already exists."""
+def make_unique_path(output_dir, filename, max_attempts=1000):
+    """Generate unique file path with (N) suffix if file already exists.
+
+    Caps at max_attempts to avoid an infinite loop if something pathological
+    happens (e.g., a directory with thousands of name collisions). Raises
+    RuntimeError on exhaustion so callers see the failure instead of hanging.
+    """
     path = os.path.join(output_dir, filename)
     if not os.path.exists(path):
         return path
     base, ext = os.path.splitext(filename)
-    n = 1
-    while True:
+    for n in range(1, max_attempts + 1):
         new_path = os.path.join(output_dir, f"{base} ({n}){ext}")
         if not os.path.exists(new_path):
             return new_path
-        n += 1
+    raise RuntimeError(
+        f"cannot find unique path for {filename} in {output_dir} "
+        f"after {max_attempts} attempts"
+    )
 
 
 # ─── Unified Naming ──────────────────────────────────────────────────

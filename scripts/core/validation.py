@@ -120,12 +120,18 @@ def validate_ocr_plausibility(
     if pdf_path and llm_amount is not None:
         try:
             llm_amount_f = float(llm_amount)
+        except (ValueError, TypeError):
+            # LLM returned a non-numeric amount (e.g. "1,280.00元"). We can't
+            # cross-check against the PDF, so flag it low-confidence so the
+            # downstream CSV marks the row as suspect instead of claiming
+            # "high confidence" by default.
+            ocr["_amountConfidence"] = "low"
+            ocr["_amountCheckSkipped"] = f"non-numeric: {llm_amount!r}"
+        else:
             page_amounts = _extract_amounts_from_pdf(pdf_path)
             if not _amount_matches_any(llm_amount_f, page_amounts, amount_tolerance_pct):
                 ocr["_amountConfidence"] = "low"
                 ocr["_amountPageValues"] = page_amounts[:10]  # for debugging
-        except (ValueError, TypeError):
-            pass
 
     # --- Date plausibility ---
     tx_date = _parse_ocr_date(ocr.get("transactionDate", ""))

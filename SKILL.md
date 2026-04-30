@@ -159,7 +159,7 @@ python3 scripts/doctor.py
 │  - classify.py  (modified: no random meal) │
 │  - matching.py  (unchanged)                │
 │  - location.py  (unchanged)                │
-│  - helpers.py   (unchanged)                │
+│  - (helpers.py NOT copied — Concur-only)   │
 │  NEW for v5.3:                             │
 │  - llm_client.py (Anthropic/Bedrock)       │
 │  - llm_ocr.py   (extract_from_bytes + cache)│

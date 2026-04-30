@@ -35,7 +35,7 @@ import os
 import random
 import threading
 import time
-from typing import Optional
+from typing import NoReturn, Optional
 
 
 # =============================================================================
@@ -144,7 +144,6 @@ class AnthropicClient(LLMClient):
             )
         except Exception as e:
             _reraise_as_llm_error(e)
-            raise  # unreachable
 
         for block in resp.content:
             if getattr(block, "type", None) == "text":
@@ -238,7 +237,6 @@ class OpenAIClient(LLMClient):
             )
         except Exception as e:
             _reraise_as_llm_error(e)
-            raise  # unreachable
 
         choice = resp.choices[0].message.content
         if not choice:
@@ -328,7 +326,6 @@ class BedrockClient(LLMClient):
             )
         except Exception as e:
             _reraise_as_llm_error(e)
-            raise
 
         body = _json.loads(resp["body"].read())
         if not body.get("content") or not body["content"][0].get("text"):
@@ -351,7 +348,7 @@ class DisabledClient(LLMClient):
 # Error classification
 # =============================================================================
 
-def _reraise_as_llm_error(e: Exception) -> None:
+def _reraise_as_llm_error(e: Exception) -> NoReturn:
     """Map provider SDK exceptions to our LLM* hierarchy."""
     msg = str(e).lower()
 

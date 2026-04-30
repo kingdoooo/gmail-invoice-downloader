@@ -86,7 +86,7 @@ CATEGORY_ORDER: Dict[str, int] = {
 
 
 # =============================================================================
-# Filename sanitization [M] — security against path traversal
+# Filename sanitization — security against path traversal
 # =============================================================================
 
 _FILENAME_REPLACE_RE = re.compile(r'[/\\:*?"<>|\n\r\t]')
@@ -110,30 +110,33 @@ def sanitize_filename(s: Optional[str], max_len: int = 80) -> str:
 
 
 def normalize_date(d: Optional[str]) -> str:
-    """LLM dates come as 'YYYY-MM-DD'. Collapse to 'YYYYMMDD' for filenames."""
+    """LLM dates come as 'YYYY-MM-DD'. Collapse to 'YYYYMMDD' for filenames.
+
+    Rejects calendar-invalid inputs like '2026-02-31' or '2026-13-05' — LLMs
+    occasionally hallucinate these and the regex alone won't catch them.
+    Returns '' on reject so callers fall back to the email internalDate.
+    """
     if not d:
         return ""
-    m = re.match(r"^(\d{4})-(\d{1,2})-(\d{1,2})", str(d).strip())
-    if not m:
-        # Already YYYYMMDD?
-        m2 = re.match(r"^(\d{8})$", str(d).strip())
-        if m2:
-            return m2.group(1)
+    s = str(d).strip()
+    m = re.match(r"^(\d{4})-(\d{1,2})-(\d{1,2})", s)
+    if m:
+        y, mo, day = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    else:
+        m2 = re.match(r"^(\d{4})(\d{2})(\d{2})$", s)
+        if not m2:
+            return ""
+        y, mo, day = int(m2.group(1)), int(m2.group(2)), int(m2.group(3))
+    try:
+        _dt.date(y, mo, day)
+    except ValueError:
         return ""
-    return f"{m.group(1)}{int(m.group(2)):02d}{int(m.group(3)):02d}"
+    return f"{y:04d}{mo:02d}{day:02d}"
 
 
-def make_unique_path(directory: str, filename: str) -> str:
-    """Append (1), (2) etc. if a file with the same name already exists."""
-    base = os.path.join(directory, filename)
-    if not os.path.exists(base):
-        return base
-    stem, ext = os.path.splitext(filename)
-    for n in range(1, 1000):
-        cand = os.path.join(directory, f"{stem} ({n}){ext}")
-        if not os.path.exists(cand):
-            return cand
-    raise RuntimeError(f"cannot find unique path for {filename} in {directory}")
+# make_unique_path lives in invoice_helpers.py; re-exported here so callers
+# that already import v53_pipeline don't need a second import line.
+from invoice_helpers import make_unique_path  # noqa: E402
 
 
 # =============================================================================
@@ -171,8 +174,26 @@ def analyze_pdf_batch(
     results: Dict[str, Dict[str, Any]] = {}
     to_analyze = [r for r in records if r.get("valid") and r.get("path")]
 
+    # Anthropic's PDF limit is 32MB; OpenAI is 32MB; Bedrock is similar. Reject
+    # oversize PDFs before read/base64 (which would balloon memory to ~5× the
+    # file size across 2+ workers) and before a guaranteed-failing LLM call.
+    MAX_PDF_BYTES = 32 * 1024 * 1024
+
     def analyze_one(record: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
         path = record["path"]
+        try:
+            size = os.path.getsize(path)
+        except OSError as e:
+            return path, {
+                "ocr": None, "category": "UNPARSED",
+                "error": f"stat failed: {e}", "used_fallback": False,
+            }
+        if size > MAX_PDF_BYTES:
+            return path, {
+                "ocr": None, "category": "UNPARSED",
+                "error": f"pdf_too_large: {size} bytes > {MAX_PDF_BYTES}",
+                "used_fallback": False,
+            }
         try:
             with open(path, "rb") as f:
                 pdf_bytes = f.read()
@@ -195,8 +216,17 @@ def analyze_pdf_batch(
                 "ocr": None, "category": "UNPARSED",
                 "error": "llm_disabled", "used_fallback": False,
             }
-        except Exception as e:
+        except LLMError as e:
+            # Expected LLM-layer failures (rate limit, server error, parse).
+            # Keep the batch going; surface the record as UNPARSED for review.
             _log(logger, f"  ❌ OCR failed for {os.path.basename(path)}: {type(e).__name__}: {str(e)[:100]}")
+            return path, {
+                "ocr": None, "category": "UNPARSED",
+                "error": f"{type(e).__name__}: {e}", "used_fallback": False,
+            }
+        except (ValueError, json.JSONDecodeError) as e:
+            # LLM returned something we couldn't parse as JSON.
+            _log(logger, f"  ❌ OCR parse failed for {os.path.basename(path)}: {type(e).__name__}: {str(e)[:100]}")
             return path, {
                 "ocr": None, "category": "UNPARSED",
                 "error": f"{type(e).__name__}: {e}", "used_fallback": False,
@@ -223,15 +253,25 @@ def analyze_pdf_batch(
             "error": None, "used_fallback": False,
         }
 
-    # Thread-pool for concurrent LLM calls (singleton client is thread-safe)
+    # Thread-pool for concurrent LLM calls (singleton client is thread-safe).
+    # Map future -> record so a crashed worker still produces an UNPARSED row
+    # instead of silently vanishing from results.
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futures = [ex.submit(analyze_one, r) for r in to_analyze]
-        for i, fut in enumerate(futures, 1):
+        futures = [(ex.submit(analyze_one, r), r) for r in to_analyze]
+        for i, (fut, rec) in enumerate(futures, 1):
             try:
                 path, analysis = fut.result()
             except Exception as e:
-                _log(logger, f"  ❌ worker crashed: {e}")
-                continue
+                # Truly unexpected — the analyze_one wrapper already catches
+                # LLMError / ValueError / OSError. Surface as UNPARSED so
+                # downstream still sees the record.
+                path = rec.get("path", "")
+                analysis = {
+                    "ocr": None, "category": "UNPARSED",
+                    "error": f"worker_crashed: {type(e).__name__}: {e}",
+                    "used_fallback": False,
+                }
+                _log(logger, f"  ❌ worker crashed on {os.path.basename(path)}: {e}")
             results[path] = analysis
             if i % 5 == 0:
                 _log(logger, f"  OCR progress: {i}/{len(to_analyze)}")
@@ -240,6 +280,12 @@ def analyze_pdf_batch(
 
 
 def _log(logger: Optional[Any], msg: str) -> None:
+    """Emit to stdout and, if a file-like logger is passed, also to that file.
+
+    Narrow exception so genuine programming errors (AttributeError on a bad
+    logger shape, TypeError from a non-str msg) surface instead of being
+    swallowed; only OSError (disk full, closed file) is expected here.
+    """
     if logger is None:
         print(msg)
         return
@@ -247,7 +293,7 @@ def _log(logger: Optional[Any], msg: str) -> None:
         try:
             logger.write(msg + "\n")
             logger.flush()
-        except Exception:
+        except (OSError, ValueError):
             pass
     print(msg)
 
@@ -315,7 +361,7 @@ def rename_by_ocr(
 
 
 # =============================================================================
-# Step 7 — do_all_matching [L]
+# Step 7 — do_all_matching (P1 remark / P2 date+amount / P3 v5.2 date-only)
 # =============================================================================
 
 def _to_float(val: Any) -> Optional[float]:
@@ -430,7 +476,7 @@ def do_all_matching(downloaded: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 # =============================================================================
-# Step 8a — write_summary_csv [B][P]
+# Step 8a — write_summary_csv (UTF-8 BOM, None-safe)
 # =============================================================================
 
 CSV_COLUMNS = ["序号", "开票日期", "类别", "金额", "销售方", "备注", "文件名", "数据可信度"]
@@ -459,11 +505,18 @@ def write_summary_csv(path: str, all_valid_records: List[Dict[str, Any]]) -> int
         ocr = r.get("ocr") or {}
         cat = r.get("category", "UNKNOWN")
 
-        # Amount: folios use balance, everything else transactionAmount
+        # Amount: folios use balance, receipts use totalAmount, else transactionAmount.
+        # Explicit None check (not `or`) so a legitimate 0.00 doesn't fall through —
+        # e.g., prepaid folio with balance=0 should show 0.00, not be replaced by
+        # transactionAmount.
         if cat == "HOTEL_FOLIO":
-            amt = _to_float(ocr.get("balance")) or _to_float(ocr.get("transactionAmount"))
+            amt = _to_float(ocr.get("balance"))
+            if amt is None:
+                amt = _to_float(ocr.get("transactionAmount"))
         elif cat == "RIDEHAILING_RECEIPT":
-            amt = _to_float(ocr.get("totalAmount")) or _to_float(ocr.get("transactionAmount"))
+            amt = _to_float(ocr.get("totalAmount"))
+            if amt is None:
+                amt = _to_float(ocr.get("transactionAmount"))
         else:
             amt = _to_float(ocr.get("transactionAmount"))
 
@@ -491,10 +544,16 @@ def write_summary_csv(path: str, all_valid_records: List[Dict[str, Any]]) -> int
         if ocr.get("_vendorNameInvalid"):
             remark_bits.append("⚠️销售方未识别")
 
-        # Confidence flag
+        # Confidence flag — any validation flag demotes the row, including
+        # unidentified vendor. Finance filtering on confidence='high' should
+        # never see a row with a ⚠️ warning in the remarks column.
         if cat == "UNPARSED" or not ocr:
             confidence = "failed"
-        elif ocr.get("_amountConfidence") == "low" or ocr.get("_dateConfidence") == "low":
+        elif (
+            ocr.get("_amountConfidence") == "low"
+            or ocr.get("_dateConfidence") == "low"
+            or ocr.get("_vendorNameInvalid")
+        ):
             confidence = "low"
         else:
             confidence = "high"
@@ -519,7 +578,7 @@ def write_summary_csv(path: str, all_valid_records: List[Dict[str, Any]]) -> int
 
 
 # =============================================================================
-# Step 8b — write_missing_json [R]
+# Step 8b — write_missing_json (schema v1.0)
 # =============================================================================
 
 MISSING_SCHEMA_VERSION = "1.0"
@@ -607,10 +666,17 @@ def _search_suggestion_for_item(
 
 
 def _compute_convergence_hash(items: List[Dict[str, Any]]) -> str:
-    """Hash the sorted list of needed_for identifiers to detect round-over-round
-    convergence (items unchanged → no progress → stop)."""
-    keys = sorted(item.get("needed_for", "") for item in items)
-    blob = "\n".join(keys).encode("utf-8")
+    """Hash sorted (type, needed_for) tuples to detect round-over-round
+    convergence (items unchanged → no progress → stop).
+
+    Including ``type`` means transitions like hotel_folio → extraction_failed
+    on the same filename register as a change, not a false convergence.
+    """
+    keys = sorted(
+        (item.get("type", ""), item.get("needed_for", ""))
+        for item in items
+    )
+    blob = json.dumps(keys, ensure_ascii=False, sort_keys=True).encode("utf-8")
     return hashlib.sha256(blob).hexdigest()[:16]
 
 
@@ -628,12 +694,12 @@ def write_missing_json(
 
     Returns the dict that was written (for caller to use / log).
 
-    Schema version 1.0 (see Phase 3.5 [R]):
+    Schema version 1.0:
       - schema_version, generated_at, iteration, iteration_cap
       - status: converged | needs_retry | max_iterations_reached | user_action_required
       - recommended_next_action: run_supplemental | stop | ask_user
       - convergence_hash: sha256(sorted needed_for keys)
-      - items: [...] per Part C4
+      - items: list of missing artifacts with per-item search suggestions
     """
     items: List[Dict[str, Any]] = []
 
@@ -749,7 +815,7 @@ def write_missing_json(
 
 
 # =============================================================================
-# Step 9 — zip_output [O]
+# Step 9 — zip_output (atomic write + allowlist)
 # =============================================================================
 
 ZIP_ALLOWED_SUFFIXES = {".pdf", ".md", ".csv"}
@@ -787,8 +853,15 @@ def zip_output(
                 suffix = os.path.splitext(fn)[1].lower()
                 if suffix not in ZIP_ALLOWED_SUFFIXES:
                     continue
-                if fn.startswith(ZIP_PREFIX):
-                    continue  # don't embed previous zips
+                # Don't embed previous zips. Tighten to .zip suffix so a legit
+                # PDF whose LLM-extracted vendor happens to begin with 发票打包_
+                # isn't silently dropped from the output.
+                if fn.startswith(ZIP_PREFIX) and fn.endswith(".zip"):
+                    continue
+                # Refuse symlinks so an attacker-placed symlink inside output_dir
+                # can't exfiltrate files from outside the tree via the zip.
+                if os.path.islink(os.path.join(root, fn)):
+                    continue
                 fp = os.path.join(root, fn)
                 arcname = os.path.relpath(fp, output_dir)
                 z.write(fp, arcname)
@@ -812,7 +885,7 @@ def zip_output(
 
 
 # =============================================================================
-# Supplemental merge [N]
+# Supplemental merge (dedup by msg_id + attachment_part_id)
 # =============================================================================
 
 def merge_supplemental_downloads(

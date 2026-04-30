@@ -90,6 +90,21 @@ def validate_and_fix_vendor_info(data: Dict[str, Any]) -> Dict[str, Any]:
     seller_tax_id = (data.get("sellerTaxId") or "")
     hotel_name = (data.get("hotelName") or "")
 
+    # Missing vendor entirely (LLM returned null or empty). Try seller / hotel
+    # fallbacks before giving up; if nothing works, mark invalid so downstream
+    # CSV shows low confidence instead of defaulting to "high".
+    if not vendor_name:
+        if seller_name:
+            data["vendorName"] = seller_name
+            if seller_tax_id:
+                data["vendorTaxId"] = seller_tax_id
+            return data
+        if hotel_name:
+            data["vendorName"] = hotel_name
+            return data
+        data["_vendorNameInvalid"] = True
+        return data
+
     is_buyer = any(kw in vendor_name for kw in BUYER_KEYWORDS)
     if not is_buyer:
         return data
@@ -203,7 +218,7 @@ def extract_from_bytes(
             return cached
 
     client = llm_client or get_client()
-    if isinstance_disabled(client):
+    if getattr(client, "provider_name", "") == "none":
         raise LLMDisabledError("LLM extraction skipped (provider=none)")
 
     prompt = get_ocr_prompt()
@@ -216,8 +231,3 @@ def extract_from_bytes(
         _cache_write(pdf_bytes, data, cache_dir)
 
     return data
-
-
-def isinstance_disabled(client: LLMClient) -> bool:
-    """Duck-type check for DisabledClient without importing it (avoids cycle)."""
-    return getattr(client, "provider_name", "") == "none"

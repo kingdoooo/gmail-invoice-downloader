@@ -832,9 +832,9 @@ def main():
         default=None,
         help="Override LLM_PROVIDER env var.",
     )
-    ap.add_argument("--ascii-names", action="store_true",
-                    help="(not yet implemented) transliterate vendor to pinyin for "
-                         "easier email forwarding.")
+    # --ascii-names was declared in v5.3 but never implemented; removed to keep
+    # the CLI contract honest. If you need pinyin filenames later, pipe the CSV
+    # through a downstream renamer, or re-add with real implementation.
 
     # v5.3 preflight
     ap.add_argument("--skip-preflight", action="store_true",
@@ -868,6 +868,11 @@ def main():
     os.makedirs(pdfs_dir, exist_ok=True)
     log_path = os.path.join(output_dir, "run.log")
     log = open(log_path, "a" if args.supplemental else "w")
+    # Ensure the log flushes + closes on interpreter exit, even if main() bails
+    # via an uncaught exception. Explicit log.close() calls below still work;
+    # atexit becomes a no-op once a file is already closed.
+    import atexit as _atexit
+    _atexit.register(lambda f=log: (f.flush(), f.close()) if not f.closed else None)
 
     def say(msg):
         print(msg)
