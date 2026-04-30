@@ -1,0 +1,14 @@
+# gmail-invoice-downloader v5.3 dependencies
+
+# Default LLM provider
+anthropic>=0.34
+
+# Gmail API client (used by scripts/invoice_helpers.py GmailClient)
+# Note: Gmail uses raw HTTPS + token refresh logic hand-rolled in GmailClient,
+# so google-api-python-client is NOT required; token.json is read directly.
+
+# Optional: Bedrock support (LLM_PROVIDER=bedrock)
+# boto3>=1.34
+
+# Test-only
+# pytest>=8.0
