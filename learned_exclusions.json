@@ -1,0 +1,204 @@
+{
+  "exclusions": [
+    {
+      "rule": "-from:apple.com",
+      "reason": "Apple 收据是 HTML 邮件正文，无 PDF 附件",
+      "confirmed": "2026-04-30"
+    },
+    {
+      "rule": "-from:cmbchina",
+      "reason": "招商银行电子账单/月结单，非报销发票",
+      "confirmed": "2026-04-30"
+    },
+    {
+      "rule": "-from:citiccard",
+      "reason": "中信银行信用卡月结单",
+      "confirmed": "2026-04-30"
+    },
+    {
+      "rule": "-from:bocomcc",
+      "reason": "交通银行信用卡月结单",
+      "confirmed": "2026-04-30"
+    },
+    {
+      "rule": "-from:cgbchina",
+      "reason": "广发银行月结单",
+      "confirmed": "2026-04-30"
+    },
+    {
+      "rule": "-from:czbank",
+      "reason": "浙商银行月结单",
+      "confirmed": "2026-04-30"
+    },
+    {
+      "rule": "-from:hsbc.co",
+      "reason": "HSBC 电子账单",
+      "confirmed": "2026-04-30"
+    },
+    {
+      "rule": "-from:guodu.com.hk",
+      "reason": "国都证券月结单",
+      "confirmed": "2026-04-30"
+    },
+    {
+      "rule": "-from:dfzq.com.hk",
+      "reason": "东方证券月结单",
+      "confirmed": "2026-04-30"
+    },
+    {
+      "rule": "-from:phillip.com.hk",
+      "reason": "辉立证券月结单",
+      "confirmed": "2026-04-30"
+    },
+    {
+      "rule": "-from:eddid",
+      "reason": "艾德证券月结单",
+      "confirmed": "2026-04-30"
+    },
+    {
+      "rule": "-from:gfgroup.com.hk",
+      "reason": "广发证券 (HK) 月结单",
+      "confirmed": "2026-04-30"
+    },
+    {
+      "rule": "-from:bosc.cn",
+      "reason": "上海银行月结单",
+      "confirmed": "2026-04-30"
+    },
+    {
+      "rule": "-from:justmysocks",
+      "reason": "Just My Socks 个人订阅服务，非报销",
+      "confirmed": "2026-04-30"
+    },
+    {
+      "rule": "-from:nexitally",
+      "reason": "Nexitally 个人订阅服务，非报销",
+      "confirmed": "2026-04-30"
+    },
+    {
+      "rule": "-from:amazonaws.com",
+      "reason": "AWS 个人账单（非公司报销范畴）",
+      "confirmed": "2026-04-30"
+    },
+    {
+      "rule": "-subject:预订确认",
+      "reason": "酒店预订确认邮件，不是发票",
+      "confirmed": "2026-04-30"
+    },
+    {
+      "rule": "-subject:预订取消",
+      "reason": "预订取消通知",
+      "confirmed": "2026-04-30"
+    },
+    {
+      "rule": "-subject:客房升级",
+      "reason": "客房升级通知",
+      "confirmed": "2026-04-30"
+    },
+    {
+      "rule": "-subject:退票",
+      "reason": "退票通知非发票",
+      "confirmed": "2026-04-30"
+    },
+    {
+      "rule": "-subject:改签",
+      "reason": "改签通知非发票",
+      "confirmed": "2026-04-30"
+    },
+    {
+      "rule": "-subject:还款",
+      "reason": "还款提醒邮件",
+      "confirmed": "2026-04-30"
+    },
+    {
+      "rule": "-subject:贷款",
+      "reason": "贷款相关通知",
+      "confirmed": "2026-04-30"
+    },
+    {
+      "rule": "-subject:eStatement",
+      "reason": "电子月结单",
+      "confirmed": "2026-04-30"
+    },
+    {
+      "rule": "-subject:月结单",
+      "reason": "中文月结单",
+      "confirmed": "2026-04-30"
+    },
+    {
+      "rule": "-subject:用户支付通知",
+      "reason": "12306 网上购票系统支付通知，无附件，真发票需登录 12306.cn 下载",
+      "confirmed": "2026-04-30"
+    },
+    {
+      "rule": "-from:googleplay-noreply@google.com",
+      "reason": "Google Play 海外订阅收据，非国内报销范畴",
+      "confirmed": "2026-04-30"
+    },
+    {
+      "rule": "-from:cebbank",
+      "reason": "光大银行信用卡月结单",
+      "confirmed": "2026-04-30"
+    },
+    {
+      "rule": "-from:mail.by.ltd",
+      "reason": "ByWave 账单已创建（个人订阅）+ 大量串邮垃圾",
+      "confirmed": "2026-04-30"
+    },
+    {
+      "rule": "-subject:账单已创建",
+      "reason": "ByWave/类似订阅系统的通知模板 + 被大量陌生人错回",
+      "confirmed": "2026-04-30"
+    },
+    {
+      "rule": "-from:mc.ihg.com",
+      "reason": "IHG One Rewards 积分/营销邮件",
+      "confirmed": "2026-04-30"
+    },
+    {
+      "rule": "-from:h5.hilton.com",
+      "reason": "Hilton Honors 品牌通知",
+      "confirmed": "2026-04-30"
+    },
+    {
+      "rule": "-from:deeplearning.ai",
+      "reason": "The Batch AI 简讯",
+      "confirmed": "2026-04-30"
+    },
+    {
+      "rule": "-from:lemonsqueezy-mail.com",
+      "reason": "Lemon Squeezy 营销/购买确认",
+      "confirmed": "2026-04-30"
+    },
+    {
+      "rule": "-from:solomonwin.com.hk",
+      "reason": "Solomon 授权续期通知",
+      "confirmed": "2026-04-30"
+    },
+    {
+      "rule": "-from:h6.hilton.com",
+      "reason": "Hilton 预订确认邮件（'您的 XXX 确认号' 模板）",
+      "confirmed": "2026-04-30"
+    },
+    {
+      "rule": "-from:feedback.hilton.com",
+      "reason": "Hilton 入住反馈问卷",
+      "confirmed": "2026-04-30"
+    },
+    {
+      "rule": "-from:forthright-sec.com",
+      "reason": "方德证券授权通知",
+      "confirmed": "2026-04-30"
+    },
+    {
+      "rule": "-from:receipts@stripe.com",
+      "reason": "Stripe 服务收据（个人订阅）",
+      "confirmed": "2026-04-30"
+    },
+    {
+      "rule": "-from:receipts@openrouter.ai",
+      "reason": "OpenRouter 个人订阅",
+      "confirmed": "2026-04-30"
+    }
+  ]
+}

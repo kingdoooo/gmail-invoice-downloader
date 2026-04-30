@@ -1,0 +1,19 @@
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.venv/
+venv/
+.env
+
+# Test output
+tests/out/
+/out/
+*.zip
+
+# User credentials (never commit)
+credentials.json
+token.json
+
+# OS
+.DS_Store
