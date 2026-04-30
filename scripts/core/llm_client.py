@@ -177,16 +177,16 @@ class AnthropicCompatibleClient(AnthropicClient):
 class OpenAIClient(LLMClient):
     """OpenAI API client. Needs OPENAI_API_KEY.
 
-    Uses GPT-4o+ native PDF input via Files API: upload the PDF, reference
-    its file_id in a chat message. Works on gpt-4o, gpt-4o-mini, gpt-4.1,
-    and any other model that accepts file inputs.
+    Sends PDF bytes inline as a base64 data URL via the `type: "file"`
+    content block (no Files API dependency). Works on any OpenAI-compatible
+    endpoint that supports chat.completions with file inputs (gpt-4o+,
+    Claude via LiteLLM, most compatible proxies).
 
     Also serves as the base for `openai-compatible` when constructed with
     base_url.
     """
 
     provider_name = "openai"
-    PDF_PURPOSE = "user_data"  # OpenAI file purpose for inline chat attachments
 
     def __init__(
         self,
@@ -214,19 +214,8 @@ class OpenAIClient(LLMClient):
         self.base_url = base_url
 
     def extract_from_pdf(self, pdf_bytes: bytes, prompt: str) -> str:
-        import io
-
-        # OpenAI doesn't accept base64 inline; need to upload via Files API.
-        try:
-            upload = self.client.files.create(
-                file=("invoice.pdf", io.BytesIO(pdf_bytes), "application/pdf"),
-                purpose=self.PDF_PURPOSE,
-            )
-        except Exception as e:
-            _reraise_as_llm_error(e)
-            raise  # unreachable
-
-        file_id = upload.id
+        pdf_b64 = base64.b64encode(pdf_bytes).decode("utf-8")
+        data_url = f"data:application/pdf;base64,{pdf_b64}"
         try:
             resp = self.client.chat.completions.create(
                 model=self.model,
@@ -235,7 +224,13 @@ class OpenAIClient(LLMClient):
                     {
                         "role": "user",
                         "content": [
-                            {"type": "file", "file": {"file_id": file_id}},
+                            {
+                                "type": "file",
+                                "file": {
+                                    "filename": "invoice.pdf",
+                                    "file_data": data_url,
+                                },
+                            },
                             {"type": "text", "text": prompt},
                         ],
                     }
@@ -244,12 +239,6 @@ class OpenAIClient(LLMClient):
         except Exception as e:
             _reraise_as_llm_error(e)
             raise  # unreachable
-        finally:
-            # Clean up the uploaded file — we don't need it after the call
-            try:
-                self.client.files.delete(file_id)
-            except Exception:
-                pass  # non-fatal
 
         choice = resp.choices[0].message.content
         if not choice:

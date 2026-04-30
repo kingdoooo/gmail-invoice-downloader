@@ -63,18 +63,18 @@ export ANTHROPIC_MODEL=claude-sonnet-4-5   # 可选
 
 #### 3. `anthropic-compatible` — Anthropic SDK + 兼容端点
 
-适用于 OpenRouter / LiteLLM proxy / Zhipu / Dashscope 等提供 Anthropic Messages API 兼容接口的端点：
+适用于 LiteLLM proxy / OpenRouter / Zhipu / Dashscope 等提供 Anthropic Messages API 兼容接口的端点：
 
 ```bash
 export LLM_PROVIDER=anthropic-compatible
-export ANTHROPIC_BASE_URL=https://openrouter.ai/api/v1
+export ANTHROPIC_BASE_URL=https://litellm.dsir.cc
 export ANTHROPIC_API_KEY='<endpoint-specific-key>'
-export ANTHROPIC_MODEL=anthropic/claude-sonnet-4-5   # 各端点 model 命名可能不同
+export ANTHROPIC_MODEL=claude-sonnet-4-6   # 各端点 model 命名可能不同
 ```
 
-#### 4. `openai` — OpenAI API 官方
+已验证：LiteLLM proxy（claude-sonnet-4-6 / claude-haiku-4-5 / claude-opus-4-7）均正确提取发票字段。
 
-用 GPT-4o+ 的 Files API 原生上传 PDF（不是 base64）：
+#### 4. `openai` — OpenAI API 官方
 
 ```bash
 export LLM_PROVIDER=openai
@@ -82,18 +82,20 @@ export OPENAI_API_KEY='<your-key>'
 export OPENAI_MODEL=gpt-4o        # 可选，默认 gpt-4o
 ```
 
+PDF 以 base64 data URL 形式内联发送（`type: "file"` 消息块），无需 Files API。适配 GPT-4o+ 的文件输入。
+
 #### 5. `openai-compatible` — OpenAI SDK + 兼容端点
 
-适用于 DeepSeek / Kimi / Qwen / vLLM / LocalAI / Azure OpenAI：
+适用于 LiteLLM proxy / DeepSeek / Kimi / Qwen / vLLM / LocalAI / Azure OpenAI：
 
 ```bash
 export LLM_PROVIDER=openai-compatible
-export OPENAI_BASE_URL=https://api.deepseek.com/v1
+export OPENAI_BASE_URL=https://litellm.dsir.cc/v1
 export OPENAI_API_KEY='<endpoint-specific-key>'
-export OPENAI_MODEL=deepseek-chat
+export OPENAI_MODEL=claude-sonnet-4-6   # 端点支持的模型名
 ```
 
-**注意**：并非所有 OpenAI 兼容端点都支持 Files API（PDF 上传）。不支持时调用会失败 → 切到 bedrock/anthropic 或先转成图片。
+已验证：LiteLLM proxy 的 chat.completions + `type: "file"` (base64 data URL) 成功提取发票字段。**注意**：并非所有 OpenAI 兼容端点都支持 file 消息块（尤其是纯文本模型）。不支持时调用会 400/500 报错 → 切到 anthropic-compatible 或同 endpoint 的其他模型。
 
 #### 6. `none` — 跳过 LLM
 
