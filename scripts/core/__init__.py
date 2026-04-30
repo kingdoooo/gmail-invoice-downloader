@@ -13,8 +13,12 @@ Modifications from source:
 - matching.py: unchanged
 - location.py: unchanged
 - validation.py: new (validate_ocr_plausibility anti-hallucination)
+- helpers.py: NOT copied — contains Concur reimbursement formatters
+  (meal-type GUIDs, expense validators) irrelevant to the Gmail aggregation
+  use case.
 
 Sync: this directory is a snapshot and does NOT auto-update when
 reimbursement-helper changes. To check for drift:
     diff -r scripts/core/ ~/reimbursement-helper/backend/agent/utils/
+(expect helpers.py difference — see above)
 """

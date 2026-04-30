@@ -64,18 +64,6 @@ def _check_gmail_credentials() -> tuple[bool, str]:
     return True, f"Gmail creds + token at {DEFAULT_TOKEN.parent}"
 
 
-def _check_gmail_ping() -> tuple[bool, str]:
-    """Actually call Gmail API with token to verify it's live."""
-    try:
-        sys.path.insert(0, str(SCRIPT_DIR))
-        from invoice_helpers import get_body_text  # noqa: F401  (just import probe)
-        # We can't easily verify token refresh without triggering a search.
-        # Skip the live call — token expiry will surface clearly on first real use.
-        return True, "Gmail client imports (live check deferred to first search)"
-    except ImportError as e:
-        return False, f"Gmail helpers import failed: {e}"
-
-
 def _check_llm_config() -> tuple[bool, str]:
     provider = (os.environ.get("LLM_PROVIDER") or "anthropic").lower()
     if provider == "none":
@@ -133,7 +121,6 @@ CHECKS = [
     ("Python >= 3.10", _check_python_version),
     ("pdftotext installed", _check_pdftotext),
     ("Gmail OAuth files", _check_gmail_credentials),
-    ("Gmail helpers import", _check_gmail_ping),
     ("LLM provider config", _check_llm_config),
     ("OCR cache writeable", _check_ocr_cache),
     ("scripts/core/ package", _check_scripts_core),

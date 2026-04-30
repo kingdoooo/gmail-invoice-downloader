@@ -160,11 +160,6 @@ def analyze_pdf_batch(
     Returns:
         {record_path: {ocr, category, city, error, used_fallback}}
     """
-    # Env override for concurrency (DX: cost-sensitive users dial down)
-    env_workers = os.environ.get("LLM_OCR_CONCURRENCY")
-    if env_workers and env_workers.isdigit():
-        max_workers = int(env_workers)
-
     # Construct client once (singleton will cache). If disabled, skip upfront.
     if use_llm:
         try:
