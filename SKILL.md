@@ -33,27 +33,71 @@ python3 scripts/download-invoices.py \
 
 ### LLM Provider（v5.3 新增）
 
-脚本通过 `scripts/core/llm_client.py` adapter 调用 LLM，**默认 AWS Bedrock**（通过 IAM Role / Instance Profile 免凭证）：
+脚本通过 `scripts/core/llm_client.py` adapter 调用 LLM。支持 **6 种 provider**，默认 Bedrock。`LLM_PROVIDER` 环境变量或 `--llm-provider` CLI 参数切换。
+
+#### 1. `bedrock`（默认）— AWS Bedrock
+
+支持 3 种 AWS 认证方式，boto3 自动按优先级选择：
+
+| 认证方式 | 设置 | 典型场景 |
+|---|---|---|
+| IAM Role / Instance Profile | 无需设置 | EC2 / ECS / Lambda |
+| AWS Profile | `AWS_PROFILE=myprofile` | 本地开发 |
+| AKSK (Access Key) | `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` | CI / 第三方环境 |
+| Bedrock API Key | `AWS_BEARER_TOKEN_BEDROCK=<key>` | boto3 ≥ 1.35.17 |
 
 ```bash
-# 典型场景：EC2 / ECS / Lambda 上 IAM Role 自动生效，无需配置
-# 本地开发：用 AWS_PROFILE 指定命名 profile
-export AWS_REGION=us-east-1                                       # 可选，默认 us-east-1
-export BEDROCK_MODEL_ID=global.anthropic.claude-sonnet-4-5        # 可选
-# export AWS_PROFILE=myprofile                                    # 如本地开发需要
+export AWS_REGION=us-east-1                                # 可选，默认 us-east-1
+export BEDROCK_MODEL_ID=global.anthropic.claude-sonnet-4-5 # 可选
 ```
 
-boto3 按标准优先级解析凭证：环境变量 → `~/.aws/credentials` → IAM Role / Instance Profile → ECS Task Role。
+boto3 凭证解析链：环境变量 → `AWS_BEARER_TOKEN_BEDROCK` → `~/.aws/credentials` → IAM Role / Instance Profile → ECS Task Role。
 
-也支持 Anthropic API（如未使用 AWS）：
+#### 2. `anthropic` — Anthropic API 官方
 
 ```bash
 export LLM_PROVIDER=anthropic
-export ANTHROPIC_API_KEY='<your-anthropic-key>'
+export ANTHROPIC_API_KEY='<your-key>'
 export ANTHROPIC_MODEL=claude-sonnet-4-5   # 可选
 ```
 
-**调试/成本敏感**：`--no-llm` 或 `--llm-provider=none` 跳过 LLM，所有 PDF 归 UNPARSED。
+#### 3. `anthropic-compatible` — Anthropic SDK + 兼容端点
+
+适用于 OpenRouter / LiteLLM proxy / Zhipu / Dashscope 等提供 Anthropic Messages API 兼容接口的端点：
+
+```bash
+export LLM_PROVIDER=anthropic-compatible
+export ANTHROPIC_BASE_URL=https://openrouter.ai/api/v1
+export ANTHROPIC_API_KEY='<endpoint-specific-key>'
+export ANTHROPIC_MODEL=anthropic/claude-sonnet-4-5   # 各端点 model 命名可能不同
+```
+
+#### 4. `openai` — OpenAI API 官方
+
+用 GPT-4o+ 的 Files API 原生上传 PDF（不是 base64）：
+
+```bash
+export LLM_PROVIDER=openai
+export OPENAI_API_KEY='<your-key>'
+export OPENAI_MODEL=gpt-4o        # 可选，默认 gpt-4o
+```
+
+#### 5. `openai-compatible` — OpenAI SDK + 兼容端点
+
+适用于 DeepSeek / Kimi / Qwen / vLLM / LocalAI / Azure OpenAI：
+
+```bash
+export LLM_PROVIDER=openai-compatible
+export OPENAI_BASE_URL=https://api.deepseek.com/v1
+export OPENAI_API_KEY='<endpoint-specific-key>'
+export OPENAI_MODEL=deepseek-chat
+```
+
+**注意**：并非所有 OpenAI 兼容端点都支持 Files API（PDF 上传）。不支持时调用会失败 → 切到 bedrock/anthropic 或先转成图片。
+
+#### 6. `none` — 跳过 LLM
+
+`--no-llm` 或 `--llm-provider=none`。所有 PDF 归 UNPARSED，只用邮件元数据命名。调试/成本敏感场景。
 
 **数据主权说明**：PDF 会以 base64 传给云端 LLM。发票含身份证号 / 手机号 / 房号 / 行程时间等敏感信息。本地模型支持未计划（未来可能通过 `LLM_PROVIDER=ollama` 扩展）。
 
@@ -406,7 +450,7 @@ switch status:
 | 0 | 全部成功 | — |
 | 1 | 未知错误 | 查 run.log |
 | 2 | Gmail auth 失败 | `run scripts/gmail-auth.py` |
-| 3 | LLM config 失败 | 检查 IAM role / `AWS_PROFILE`，或 `LLM_PROVIDER=anthropic` + `ANTHROPIC_API_KEY`，或 `--no-llm` |
+| 3 | LLM config 失败 | 查 stderr REMEDIATION：针对当前 provider 调 AWS/Anthropic/OpenAI 凭证，或切 `--llm-provider=none` |
 | 4 | Gmail 配额超限 | 等 60 秒 + `--max-results` 降低 |
 | 5 | 部分成功 | 正常出交付物，但有 UNPARSED 或 failed 项 → 查 missing.json |
 

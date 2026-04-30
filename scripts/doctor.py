@@ -66,12 +66,16 @@ def _check_gmail_credentials() -> tuple[bool, str]:
 
 def _check_llm_config() -> tuple[bool, str]:
     provider = (os.environ.get("LLM_PROVIDER") or "bedrock").lower()
+
     if provider == "none":
         return True, "LLM_PROVIDER=none (OCR disabled)"
+
     if provider == "bedrock":
         region = os.environ.get("AWS_REGION", "us-east-1")
-        # Resolve credentials through the full boto3 chain: env vars, ~/.aws,
-        # IAM role / instance profile, ECS task role, etc. No live API call.
+        # boto3 1.35.17+ reads AWS_BEARER_TOKEN_BEDROCK (Bedrock API Key).
+        if os.environ.get("AWS_BEARER_TOKEN_BEDROCK"):
+            model = os.environ.get("BEDROCK_MODEL_ID", "claude-sonnet-4-5 (default)")
+            return True, f"Bedrock via API key (region={region}, model={model})"
         try:
             import boto3
         except ImportError:
@@ -86,23 +90,69 @@ def _check_llm_config() -> tuple[bool, str]:
             return False, f"boto3 session failed: {e}"
         if creds is None:
             return False, (
-                f"LLM_PROVIDER=bedrock but no AWS credentials resolved "
-                f"(tried env, ~/.aws, IAM role, instance profile). "
-                f"REMEDIATION: assume a role, set AWS_PROFILE, or pass --no-llm."
+                "LLM_PROVIDER=bedrock but no AWS credentials resolved "
+                "(tried env, ~/.aws, IAM role, instance profile, Bedrock API key). "
+                "REMEDIATION: assume a role, set AWS_PROFILE / AWS_ACCESS_KEY_ID, "
+                "export AWS_BEARER_TOKEN_BEDROCK=..., or pass --no-llm."
             )
         method = getattr(creds, "method", "unknown")
         model = os.environ.get("BEDROCK_MODEL_ID", "claude-sonnet-4-5 (default)")
-        return True, f"Bedrock credentials via {method} (region={region}, model={model})"
+        return True, f"Bedrock via {method} (region={region}, model={model})"
+
     if provider == "anthropic":
-        if os.environ.get("ANTHROPIC_API_KEY"):
-            model = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-5 (default)")
-            return True, f"Anthropic API key present (model={model})"
-        return False, (
-            "LLM_PROVIDER=anthropic but ANTHROPIC_API_KEY not set. "
-            "REMEDIATION: export ANTHROPIC_API_KEY=... OR "
-            "set LLM_PROVIDER=bedrock OR pass --no-llm."
-        )
-    return False, f"Unknown LLM_PROVIDER={provider}. REMEDIATION: set bedrock|anthropic|none."
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            return False, (
+                "LLM_PROVIDER=anthropic but ANTHROPIC_API_KEY not set. "
+                "REMEDIATION: export ANTHROPIC_API_KEY=..., switch provider, or --no-llm."
+            )
+        model = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-5 (default)")
+        return True, f"Anthropic API key present (model={model})"
+
+    if provider == "anthropic-compatible":
+        base = os.environ.get("ANTHROPIC_BASE_URL")
+        key = os.environ.get("ANTHROPIC_API_KEY")
+        if not base:
+            return False, (
+                "LLM_PROVIDER=anthropic-compatible but ANTHROPIC_BASE_URL not set. "
+                "REMEDIATION: export ANTHROPIC_BASE_URL=https://... (e.g. openrouter, litellm)."
+            )
+        if not key:
+            return False, (
+                "LLM_PROVIDER=anthropic-compatible but ANTHROPIC_API_KEY not set. "
+                "REMEDIATION: export ANTHROPIC_API_KEY=... (endpoint-specific key)."
+            )
+        model = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-5 (default)")
+        return True, f"Anthropic-compatible endpoint {base} (model={model})"
+
+    if provider == "openai":
+        if not os.environ.get("OPENAI_API_KEY"):
+            return False, (
+                "LLM_PROVIDER=openai but OPENAI_API_KEY not set. "
+                "REMEDIATION: export OPENAI_API_KEY=..., switch provider, or --no-llm."
+            )
+        model = os.environ.get("OPENAI_MODEL", "gpt-4o (default)")
+        return True, f"OpenAI API key present (model={model})"
+
+    if provider == "openai-compatible":
+        base = os.environ.get("OPENAI_BASE_URL")
+        key = os.environ.get("OPENAI_API_KEY")
+        if not base:
+            return False, (
+                "LLM_PROVIDER=openai-compatible but OPENAI_BASE_URL not set. "
+                "REMEDIATION: export OPENAI_BASE_URL=https://... (e.g. DeepSeek, Qwen, vLLM)."
+            )
+        if not key:
+            return False, (
+                "LLM_PROVIDER=openai-compatible but OPENAI_API_KEY not set. "
+                "REMEDIATION: export OPENAI_API_KEY=... (endpoint-specific key)."
+            )
+        model = os.environ.get("OPENAI_MODEL", "gpt-4o (default)")
+        return True, f"OpenAI-compatible endpoint {base} (model={model})"
+
+    return False, (
+        f"Unknown LLM_PROVIDER={provider}. "
+        f"REMEDIATION: set bedrock|anthropic|anthropic-compatible|openai|openai-compatible|none."
+    )
 
 
 def _check_ocr_cache() -> tuple[bool, str]:

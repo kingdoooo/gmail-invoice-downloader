@@ -2,9 +2,22 @@
 Provider-agnostic LLM adapter for invoice OCR.
 
 Exposes a uniform interface (LLMClient.extract_from_pdf) over:
-- AWS Bedrock via `boto3` (default — typically via IAM role / instance profile)
-- Anthropic API via the `anthropic` SDK (LLM_PROVIDER=anthropic)
-- Disabled mode ("none") which raises LLMDisabledError — used by --no-llm
+
+  bedrock               — AWS Bedrock via `boto3`. Auth via IAM role /
+                          instance profile / AWS_PROFILE / AWS_ACCESS_KEY_ID
+                          (AKSK) / AWS_BEARER_TOKEN_BEDROCK (Bedrock API key,
+                          boto3 >= 1.35.17). **Default.**
+  anthropic             — Anthropic API via `anthropic` SDK.
+                          Needs ANTHROPIC_API_KEY.
+  anthropic-compatible  — `anthropic` SDK pointed at a compatible endpoint
+                          (OpenRouter, LiteLLM proxy, Zhipu, Dashscope).
+                          Needs ANTHROPIC_BASE_URL + ANTHROPIC_API_KEY.
+  openai                — OpenAI API via `openai` SDK. Needs OPENAI_API_KEY.
+                          Uses GPT-4o family PDF ingestion (Files API).
+  openai-compatible     — `openai` SDK pointed at a compatible endpoint
+                          (DeepSeek, Kimi, Qwen, vLLM, LocalAI, Azure OpenAI).
+                          Needs OPENAI_BASE_URL + OPENAI_API_KEY.
+  none                  — Disabled. Raises LLMDisabledError — used by --no-llm.
 
 Singleton: one client instance per process (see get_client()). Thread-safe
 via a module-level lock. Callers share the same underlying SDK client, which
@@ -71,11 +84,19 @@ class LLMClient:
 
 
 class AnthropicClient(LLMClient):
-    """Anthropic API client. Requires ANTHROPIC_API_KEY."""
+    """Anthropic API client. Needs ANTHROPIC_API_KEY.
+
+    Also serves as the base for `anthropic-compatible` when constructed with
+    an explicit base_url (OpenRouter, LiteLLM proxy, etc.).
+    """
 
     provider_name = "anthropic"
 
-    def __init__(self, model: Optional[str] = None):
+    def __init__(
+        self,
+        model: Optional[str] = None,
+        base_url: Optional[str] = None,
+    ):
         try:
             import anthropic
         except ImportError as e:
@@ -85,15 +106,18 @@ class AnthropicClient(LLMClient):
 
         if not os.environ.get("ANTHROPIC_API_KEY"):
             raise LLMAuthError(
-                "ANTHROPIC_API_KEY not set. Either export it, or set "
-                "LLM_PROVIDER=bedrock to use AWS Bedrock instead."
+                "ANTHROPIC_API_KEY not set. Either export it, or switch "
+                "LLM_PROVIDER (bedrock / openai / none)."
             )
 
-        self._anthropic = anthropic
-        self.client = anthropic.Anthropic()
+        kwargs = {}
+        if base_url:
+            kwargs["base_url"] = base_url
+        self.client = anthropic.Anthropic(**kwargs)
         self.model = model or os.environ.get(
             "ANTHROPIC_MODEL", "claude-sonnet-4-5"
         )
+        self.base_url = base_url
 
     def extract_from_pdf(self, pdf_bytes: bytes, prompt: str) -> str:
         pdf_b64 = base64.b64encode(pdf_bytes).decode("utf-8")
@@ -120,7 +144,7 @@ class AnthropicClient(LLMClient):
             )
         except Exception as e:
             _reraise_as_llm_error(e)
-            raise  # unreachable, but keeps type checker happy
+            raise  # unreachable
 
         for block in resp.content:
             if getattr(block, "type", None) == "text":
@@ -128,6 +152,132 @@ class AnthropicClient(LLMClient):
         raise LLMError(
             f"Anthropic returned no text block. stop_reason={resp.stop_reason}"
         )
+
+
+class AnthropicCompatibleClient(AnthropicClient):
+    """Anthropic SDK pointed at a compatible endpoint.
+
+    Requires ANTHROPIC_BASE_URL (e.g. https://openrouter.ai/api/v1,
+    https://dashscope.aliyuncs.com/api/v2/apps/xxx, litellm proxy).
+    """
+
+    provider_name = "anthropic-compatible"
+
+    def __init__(self, model: Optional[str] = None):
+        base_url = os.environ.get("ANTHROPIC_BASE_URL")
+        if not base_url:
+            raise LLMConfigError(
+                "LLM_PROVIDER=anthropic-compatible but ANTHROPIC_BASE_URL "
+                "not set. Example: export ANTHROPIC_BASE_URL=https://"
+                "openrouter.ai/api/v1"
+            )
+        super().__init__(model=model, base_url=base_url)
+
+
+class OpenAIClient(LLMClient):
+    """OpenAI API client. Needs OPENAI_API_KEY.
+
+    Uses GPT-4o+ native PDF input via Files API: upload the PDF, reference
+    its file_id in a chat message. Works on gpt-4o, gpt-4o-mini, gpt-4.1,
+    and any other model that accepts file inputs.
+
+    Also serves as the base for `openai-compatible` when constructed with
+    base_url.
+    """
+
+    provider_name = "openai"
+    PDF_PURPOSE = "user_data"  # OpenAI file purpose for inline chat attachments
+
+    def __init__(
+        self,
+        model: Optional[str] = None,
+        base_url: Optional[str] = None,
+    ):
+        try:
+            from openai import OpenAI
+        except ImportError as e:
+            raise LLMConfigError(
+                "openai SDK not installed. Run: pip install openai"
+            ) from e
+
+        if not os.environ.get("OPENAI_API_KEY"):
+            raise LLMAuthError(
+                "OPENAI_API_KEY not set. Either export it, or switch "
+                "LLM_PROVIDER (bedrock / anthropic / none)."
+            )
+
+        kwargs = {}
+        if base_url:
+            kwargs["base_url"] = base_url
+        self.client = OpenAI(**kwargs)
+        self.model = model or os.environ.get("OPENAI_MODEL", "gpt-4o")
+        self.base_url = base_url
+
+    def extract_from_pdf(self, pdf_bytes: bytes, prompt: str) -> str:
+        import io
+
+        # OpenAI doesn't accept base64 inline; need to upload via Files API.
+        try:
+            upload = self.client.files.create(
+                file=("invoice.pdf", io.BytesIO(pdf_bytes), "application/pdf"),
+                purpose=self.PDF_PURPOSE,
+            )
+        except Exception as e:
+            _reraise_as_llm_error(e)
+            raise  # unreachable
+
+        file_id = upload.id
+        try:
+            resp = self.client.chat.completions.create(
+                model=self.model,
+                max_tokens=2000,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "file", "file": {"file_id": file_id}},
+                            {"type": "text", "text": prompt},
+                        ],
+                    }
+                ],
+            )
+        except Exception as e:
+            _reraise_as_llm_error(e)
+            raise  # unreachable
+        finally:
+            # Clean up the uploaded file — we don't need it after the call
+            try:
+                self.client.files.delete(file_id)
+            except Exception:
+                pass  # non-fatal
+
+        choice = resp.choices[0].message.content
+        if not choice:
+            raise LLMError(
+                f"OpenAI returned empty content. finish_reason={resp.choices[0].finish_reason}"
+            )
+        return choice
+
+
+class OpenAICompatibleClient(OpenAIClient):
+    """OpenAI SDK pointed at a compatible endpoint.
+
+    Requires OPENAI_BASE_URL (DeepSeek, Kimi, Qwen, vLLM, LocalAI, Azure).
+    Note: not every compatible endpoint supports file uploads. If yours
+    doesn't, this call will fail — consider converting the PDF to images
+    externally, or switch to Anthropic/Bedrock.
+    """
+
+    provider_name = "openai-compatible"
+
+    def __init__(self, model: Optional[str] = None):
+        base_url = os.environ.get("OPENAI_BASE_URL")
+        if not base_url:
+            raise LLMConfigError(
+                "LLM_PROVIDER=openai-compatible but OPENAI_BASE_URL not set. "
+                "Example: export OPENAI_BASE_URL=https://api.deepseek.com/v1"
+            )
+        super().__init__(model=model, base_url=base_url)
 
 
 class BedrockClient(LLMClient):
@@ -246,7 +396,8 @@ def get_client(provider_override: Optional[str] = None) -> LLMClient:
       2. LLM_PROVIDER env var
       3. Default: "bedrock" (typically via IAM role / instance profile)
 
-    Values: "bedrock", "anthropic", "none"
+    Values: "bedrock", "anthropic", "anthropic-compatible",
+            "openai", "openai-compatible", "none"
 
     Thread-safe. First call constructs the client; subsequent calls reuse it
     even across threads.
@@ -267,12 +418,18 @@ def get_client(provider_override: Optional[str] = None) -> LLMClient:
             client: LLMClient = BedrockClient()
         elif provider == "anthropic":
             client = AnthropicClient()
+        elif provider == "anthropic-compatible":
+            client = AnthropicCompatibleClient()
+        elif provider == "openai":
+            client = OpenAIClient()
+        elif provider == "openai-compatible":
+            client = OpenAICompatibleClient()
         elif provider == "none":
             client = DisabledClient()
         else:
             raise LLMConfigError(
-                f"Unknown LLM_PROVIDER={provider!r}. "
-                f"Valid: bedrock, anthropic, none."
+                f"Unknown LLM_PROVIDER={provider!r}. Valid: bedrock, "
+                f"anthropic, anthropic-compatible, openai, openai-compatible, none."
             )
 
         _client = client

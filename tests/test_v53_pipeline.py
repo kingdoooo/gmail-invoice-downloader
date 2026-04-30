@@ -26,9 +26,12 @@ import pytest
 
 # conftest.py puts scripts/ on sys.path
 from core.llm_client import (
+    LLMAuthError,
     LLMClient,
+    LLMConfigError,
     LLMRateLimitError,
     extract_with_retry,
+    get_client,
     reset_client,
 )
 from core.llm_ocr import (
@@ -536,3 +539,154 @@ class TestE2E:
         assert pdfs_in_zip == 3
         assert not any("missing.json" in n for n in names)
         assert not any("run.log" in n for n in names)
+
+
+# =============================================================================
+# Provider matrix — 6 paths through get_client()
+# =============================================================================
+
+class TestProviderMatrix:
+    """Construct each provider to verify env-var contracts + error messages."""
+
+    # Env vars we need to scrub between tests so one test doesn't leak into
+    # the next via the singleton or os.environ.
+    _PROVIDER_ENVS = [
+        "LLM_PROVIDER",
+        "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL",
+        "OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_MODEL",
+    ]
+
+    @pytest.fixture(autouse=True)
+    def _clean_env(self, monkeypatch):
+        for k in self._PROVIDER_ENVS:
+            monkeypatch.delenv(k, raising=False)
+        reset_client()
+        yield
+        reset_client()
+
+    def test_anthropic_needs_api_key(self):
+        with pytest.raises(LLMAuthError, match="ANTHROPIC_API_KEY"):
+            get_client("anthropic")
+
+    def test_anthropic_compatible_needs_base_url(self, monkeypatch):
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        with pytest.raises(LLMConfigError, match="ANTHROPIC_BASE_URL"):
+            get_client("anthropic-compatible")
+
+    def test_anthropic_compatible_needs_api_key_too(self, monkeypatch):
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://openrouter.ai/api/v1")
+        with pytest.raises(LLMAuthError, match="ANTHROPIC_API_KEY"):
+            get_client("anthropic-compatible")
+
+    def test_anthropic_compatible_builds(self, monkeypatch):
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://openrouter.ai/api/v1")
+        c = get_client("anthropic-compatible")
+        assert c.provider_name == "anthropic-compatible"
+        assert c.base_url == "https://openrouter.ai/api/v1"
+
+    def test_openai_needs_api_key(self):
+        with pytest.raises(LLMAuthError, match="OPENAI_API_KEY"):
+            get_client("openai")
+
+    def test_openai_builds(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        c = get_client("openai")
+        assert c.provider_name == "openai"
+        assert c.model == "gpt-4o"
+
+    def test_openai_respects_model_env(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        monkeypatch.setenv("OPENAI_MODEL", "gpt-4.1")
+        c = get_client("openai")
+        assert c.model == "gpt-4.1"
+
+    def test_openai_compatible_needs_base_url(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        with pytest.raises(LLMConfigError, match="OPENAI_BASE_URL"):
+            get_client("openai-compatible")
+
+    def test_openai_compatible_needs_api_key_too(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_BASE_URL", "https://api.deepseek.com/v1")
+        with pytest.raises(LLMAuthError, match="OPENAI_API_KEY"):
+            get_client("openai-compatible")
+
+    def test_openai_compatible_builds(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-ds")
+        monkeypatch.setenv("OPENAI_BASE_URL", "https://api.deepseek.com/v1")
+        c = get_client("openai-compatible")
+        assert c.provider_name == "openai-compatible"
+        assert c.base_url == "https://api.deepseek.com/v1"
+
+    def test_unknown_provider_raises(self):
+        with pytest.raises(LLMConfigError, match="Unknown LLM_PROVIDER"):
+            get_client("claude-desktop")
+
+    def test_default_is_bedrock(self, monkeypatch):
+        # No LLM_PROVIDER env; default path must pick bedrock. We don't care
+        # about live auth — just that BedrockClient is selected.
+        c = get_client()
+        assert c.provider_name == "bedrock"
+
+
+# =============================================================================
+# Doctor LLM check matrix (offline — no live API call)
+# =============================================================================
+
+class TestDoctorLLMMatrix:
+    """_check_llm_config must handle all 6 providers without calling out."""
+
+    _ENVS = [
+        "LLM_PROVIDER", "AWS_BEARER_TOKEN_BEDROCK",
+        "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL",
+        "OPENAI_API_KEY", "OPENAI_BASE_URL",
+    ]
+
+    @pytest.fixture(autouse=True)
+    def _clean_env(self, monkeypatch):
+        for k in self._ENVS:
+            monkeypatch.delenv(k, raising=False)
+        yield
+
+    def _check(self):
+        from doctor import _check_llm_config
+        return _check_llm_config()
+
+    def test_bedrock_with_bearer_token(self, monkeypatch):
+        monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "bearer-xyz")
+        ok, msg = self._check()
+        assert ok and "API key" in msg
+
+    def test_anthropic_missing_key(self, monkeypatch):
+        monkeypatch.setenv("LLM_PROVIDER", "anthropic")
+        ok, msg = self._check()
+        assert not ok and "ANTHROPIC_API_KEY" in msg
+
+    def test_anthropic_ok(self, monkeypatch):
+        monkeypatch.setenv("LLM_PROVIDER", "anthropic")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+        ok, msg = self._check()
+        assert ok and "Anthropic" in msg
+
+    def test_anthropic_compatible_missing_base(self, monkeypatch):
+        monkeypatch.setenv("LLM_PROVIDER", "anthropic-compatible")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-any")
+        ok, msg = self._check()
+        assert not ok and "ANTHROPIC_BASE_URL" in msg
+
+    def test_openai_ok(self, monkeypatch):
+        monkeypatch.setenv("LLM_PROVIDER", "openai")
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-oai")
+        ok, msg = self._check()
+        assert ok and "OpenAI" in msg
+
+    def test_openai_compatible_missing_base(self, monkeypatch):
+        monkeypatch.setenv("LLM_PROVIDER", "openai-compatible")
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-any")
+        ok, msg = self._check()
+        assert not ok and "OPENAI_BASE_URL" in msg
+
+    def test_unknown_provider(self, monkeypatch):
+        monkeypatch.setenv("LLM_PROVIDER", "claude-desktop")
+        ok, msg = self._check()
+        assert not ok and "Unknown LLM_PROVIDER" in msg

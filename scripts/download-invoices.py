@@ -823,9 +823,15 @@ def main():
     ap.add_argument("--no-llm", action="store_true",
                     help="Skip LLM OCR entirely. All valid PDFs classified as UNPARSED, "
                          "no vendor/amount/date extraction. For cost-sensitive dry runs.")
-    ap.add_argument("--llm-provider", choices=["anthropic", "bedrock", "none"],
-                    default=None,
-                    help="Override LLM_PROVIDER env var.")
+    ap.add_argument(
+        "--llm-provider",
+        choices=[
+            "bedrock", "anthropic", "anthropic-compatible",
+            "openai", "openai-compatible", "none",
+        ],
+        default=None,
+        help="Override LLM_PROVIDER env var.",
+    )
     ap.add_argument("--ascii-names", action="store_true",
                     help="(not yet implemented) transliterate vendor to pinyin for "
                          "easier email forwarding.")
