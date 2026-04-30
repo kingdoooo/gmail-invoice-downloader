@@ -1,0 +1,147 @@
+"""
+LLM prompts for invoice OCR extraction.
+
+Extracted from reimbursement-helper's bedrock_ocr.py (commit a0e8515).
+Any change here should be mirrored back to reimbursement-helper for
+consistency — the OCR prompt is the shared contract.
+"""
+
+
+def get_ocr_prompt() -> str:
+    """Return the OCR extraction prompt for invoice documents."""
+    return """# 发票信息提取任务
+
+请从发票图片中提取以下字段，返回 JSON 格式。
+
+## 通用字段（所有发票类型）
+
+| 字段名 | 类型 | 说明 |
+|--------|------|------|
+| transactionDate | string | 开票日期，格式 YYYY-MM-DD |
+| transactionAmount | number | 价税合计金额 |
+| vendorName | string | 销售方名称（见下方重要规则） |
+| vendorTaxId | string | 销售方统一社会信用代码（18位） |
+| serviceType | string | 服务类型，如 "*餐饮服务*餐饮费", "*运输服务*客运服务费", "*住宿服务*房费", "*电信服务*通信服务费", "*旅游服务*代订车服务费" |
+| docType | string | 文档类型，如 "电子发票（普通发票）", "电子发票（增值税专用发票）", "Guest Folio", "INFORMATION INVOICE", "INFORMATION BILL", "行程单", "行程报销单", "出租汽车发票" |
+| isChineseInvoice | boolean | 是否为中国增值税发票, 有发票印章（税务局）, 发票号码, 销售方/购买方信息, 统一社会信用代码 |
+
+## ⚠️ 重要规则：购买方/销售方区分
+
+中国增值税发票布局：
+```
+┌─────────────────────────────────────────────────┐
+│  购买方（左侧）          │  销售方（右侧）          │
+│  名称：亚马逊信息服务...  │  名称：XX餐饮公司        │
+│  税号：91110...         │  税号：91320...        │
+└─────────────────────────────────────────────────┘
+```
+
+**必须同时提取两方信息：**
+
+| 字段名 | 类型 | 说明 |
+|--------|------|------|
+| buyerName | string | 购买方名称（左侧）- 通常是亚马逊等公司 |
+| buyerTaxId | string | 购买方税号（左侧） |
+| sellerName | string | 销售方名称（右侧）- 提供服务的商家 |
+| sellerTaxId | string | 销售方税号（右侧） |
+
+**关键规则：**
+- ✅ vendorName 必须等于 sellerName（销售方/右侧）
+- ✅ vendorTaxId 必须等于 sellerTaxId（销售方/右侧）
+- ❌ 绝对不能把购买方信息填入vendorName/vendorTaxId
+- ❌ 如果vendorName包含"亚马逊"，说明提取错误
+
+## 酒店发票专用字段
+
+| 字段名 | 类型 | 说明 |
+|--------|------|------|
+| transactionAmountNoVAT | number | 金额栏数值（不含税），不是价税合计 |
+| VAT | number | 税额栏数值 |
+| remark | string | 备注栏中的确认号 |
+| checkInDate | string | 入住日期 YYYY-MM-DD |
+| checkOutDate | string | 离店日期 YYYY-MM-DD |
+
+验证：transactionAmountNoVAT + VAT = transactionAmount（允许 ±0.01 误差）
+
+## 酒店水单(Guest Folio)专用字段
+
+| 字段名 | 类型 | 说明 |
+|--------|------|------|
+| balance | number | 应付总额 |
+| hotelName | string | 酒店名称 |
+| confirmationNo | string | 确认号/预订号 |
+| internalCodes | array | 内部编码列表（用于匹配发票备注） |
+| arrivalDate | string | Check-in date, 到达日期 YYYY-MM-DD |
+| departureDate | string | Check-out date, 离开日期 YYYY-MM-DD |
+| city | string | 城市名（可能是英文如 "WUXI"） |
+| roomNumber | string | 房间号 |
+
+## 网约车发票专用字段
+
+| 字段名 | 类型 | 说明 |
+|--------|------|------|
+| invoiceCode | string | 发票代码（12位，如有） |
+
+## 网约车行程单专用字段
+
+| 字段名 | 类型 | 说明 |
+|--------|------|------|
+| totalAmount | number | 合计金额 |
+| tripCount | number | 行程数量 |
+| city | string | 从表格"城市"列提取，去掉"市"后缀 |
+
+行程单表格示例：
+```
+序号 | 车型 | 上车时间 | 城市 | 起点 | 终点 | 金额
+1    | 专车 | 01-10    | 南京市| ...  | ...  | 25.00
+```
+提取 city = "南京"（去掉"市"）
+
+## 话费发票专用字段
+
+| 字段名 | 类型 | 说明 |
+|--------|------|------|
+| billingPeriod | string | 账期，格式 YYYY-MM 或 YYYYMM-YYYYMM |
+| phoneNumber | string | 手机号码 |
+
+## 火车票/铁路电子客票专用字段
+
+铁路电子客票（docType: "电子发票（铁路电子客票）"）没有传统的销售方/购买方结构。
+
+| 字段名 | 类型 | 说明 |
+|--------|------|------|
+| trainNumber | string | 车次，如 "D952", "G747", "K123" |
+| departureStation | string | 出发站，如 "上海", "无锡东" |
+| arrivalStation | string | 到达站，如 "无锡", "上海虹桥" |
+| seatClass | string | 座席等级，如 "二等座", "一等座", "商务座" |
+| departureTime | string | 出发时间，格式 HH:MM，如 "08:30" |
+
+**火车票特殊规则：**
+- vendorName 填写 "中国铁路"（铁路票据由国家税务总局开具，无商业销售方）
+- vendorTaxId 填写 null
+- transactionDate 使用乘车日期（非开票日期）
+- transactionAmount 使用票价金额
+- docType 填写 "电子发票（铁路电子客票）"
+- 购买方名称仍然提取到 buyerName 字段
+
+## 输出格式
+
+返回纯 JSON，不要添加任何说明文字：
+
+```json
+{
+  "transactionDate": "2025-01-10",
+  "transactionAmount": 156.00,
+  "buyerName": "亚马逊信息服务（北京）有限公司上海分公司",
+  "buyerTaxId": "91310115MA1K4XXXXX",
+  "sellerName": "无锡茵赫餐饮管理有限公司",
+  "sellerTaxId": "91320214MA1XXXXXX",
+  "vendorName": "无锡茵赫餐饮管理有限公司",
+  "vendorTaxId": "91320214MA1XXXXXX",
+  "serviceType": "*餐饮服务*餐饮费",
+  "docType": "电子发票（普通发票）",
+  "isChineseInvoice": true
+}
+```
+
+注意：vendorName/vendorTaxId 必须与 sellerName/sellerTaxId 相同。缺失字段使用 null。"""
