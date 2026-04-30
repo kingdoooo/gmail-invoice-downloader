@@ -12,7 +12,7 @@ icon: "🧾"
 ## Quick Start
 
 ```bash
-export ANTHROPIC_API_KEY=sk-ant-...
+export ANTHROPIC_API_KEY='<your-anthropic-key>'
 python3 scripts/download-invoices.py \
     --start 2026/01/01 \
     --end 2026/05/01 \
@@ -36,7 +36,8 @@ python3 scripts/download-invoices.py \
 脚本通过 `scripts/core/llm_client.py` adapter 调用 LLM，**默认 Anthropic API**：
 
 ```bash
-export ANTHROPIC_API_KEY=sk-ant-xxxxxxxx
+# Anthropic console → create API key → paste here
+export ANTHROPIC_API_KEY='<your-anthropic-key>'
 # 可选，默认 claude-sonnet-4-5
 export ANTHROPIC_MODEL=claude-sonnet-4-5
 ```
