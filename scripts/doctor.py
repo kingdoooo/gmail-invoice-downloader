@@ -65,9 +65,34 @@ def _check_gmail_credentials() -> tuple[bool, str]:
 
 
 def _check_llm_config() -> tuple[bool, str]:
-    provider = (os.environ.get("LLM_PROVIDER") or "anthropic").lower()
+    provider = (os.environ.get("LLM_PROVIDER") or "bedrock").lower()
     if provider == "none":
         return True, "LLM_PROVIDER=none (OCR disabled)"
+    if provider == "bedrock":
+        region = os.environ.get("AWS_REGION", "us-east-1")
+        # Resolve credentials through the full boto3 chain: env vars, ~/.aws,
+        # IAM role / instance profile, ECS task role, etc. No live API call.
+        try:
+            import boto3
+        except ImportError:
+            return False, (
+                "LLM_PROVIDER=bedrock but boto3 not installed. "
+                "REMEDIATION: pip install boto3"
+            )
+        try:
+            session = boto3.Session()
+            creds = session.get_credentials()
+        except Exception as e:
+            return False, f"boto3 session failed: {e}"
+        if creds is None:
+            return False, (
+                f"LLM_PROVIDER=bedrock but no AWS credentials resolved "
+                f"(tried env, ~/.aws, IAM role, instance profile). "
+                f"REMEDIATION: assume a role, set AWS_PROFILE, or pass --no-llm."
+            )
+        method = getattr(creds, "method", "unknown")
+        model = os.environ.get("BEDROCK_MODEL_ID", "claude-sonnet-4-5 (default)")
+        return True, f"Bedrock credentials via {method} (region={region}, model={model})"
     if provider == "anthropic":
         if os.environ.get("ANTHROPIC_API_KEY"):
             model = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-5 (default)")
@@ -77,17 +102,7 @@ def _check_llm_config() -> tuple[bool, str]:
             "REMEDIATION: export ANTHROPIC_API_KEY=... OR "
             "set LLM_PROVIDER=bedrock OR pass --no-llm."
         )
-    if provider == "bedrock":
-        has_profile = os.environ.get("AWS_PROFILE")
-        has_keys = os.environ.get("AWS_ACCESS_KEY_ID") and os.environ.get("AWS_SECRET_ACCESS_KEY")
-        region = os.environ.get("AWS_REGION", "us-east-1")
-        if has_profile or has_keys:
-            return True, f"Bedrock configured (region={region})"
-        return False, (
-            "LLM_PROVIDER=bedrock but no AWS credentials found. "
-            "REMEDIATION: set AWS_PROFILE or AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY."
-        )
-    return False, f"Unknown LLM_PROVIDER={provider}. REMEDIATION: set anthropic|bedrock|none."
+    return False, f"Unknown LLM_PROVIDER={provider}. REMEDIATION: set bedrock|anthropic|none."
 
 
 def _check_ocr_cache() -> tuple[bool, str]:

@@ -28,7 +28,8 @@ Supplemental mode (loop to fill gaps):
         --output ./out --query "水单 OR folio 万豪"
 
 Defaults to credentials at ~/.openclaw/credentials/gmail/{credentials,token}.json.
-LLM: requires ANTHROPIC_API_KEY (default) or LLM_PROVIDER=bedrock + AWS creds.
+LLM: defaults to Bedrock (IAM role / instance profile). Override with
+LLM_PROVIDER=anthropic + ANTHROPIC_API_KEY, or --no-llm to skip OCR entirely.
 
 Exit codes: 0=ok, 2=auth, 3=llm_config, 4=gmail_quota, 5=partial, 1=unknown.
 """
@@ -853,7 +854,7 @@ def main():
         os.environ["LLM_PROVIDER"] = "none"
     elif args.llm_provider:
         os.environ["LLM_PROVIDER"] = args.llm_provider
-    use_llm = os.environ.get("LLM_PROVIDER", "anthropic") != "none"
+    use_llm = os.environ.get("LLM_PROVIDER", "bedrock") != "none"
 
     # --- Setup ---
     output_dir = os.path.expanduser(args.output)
@@ -880,7 +881,7 @@ def main():
     say(f"Run started @ {datetime.datetime.now(CST).strftime('%Y-%m-%d %H:%M:%S')} CST")
     say("=" * 70)
     say(f"Date range: {args.start} → {args.end}")
-    say(f"LLM provider: {os.environ.get('LLM_PROVIDER', 'anthropic')}"
+    say(f"LLM provider: {os.environ.get('LLM_PROVIDER', 'bedrock')}"
         + (" [disabled]" if not use_llm else ""))
 
     # --- Query ---

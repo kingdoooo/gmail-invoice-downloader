@@ -2,8 +2,8 @@
 Provider-agnostic LLM adapter for invoice OCR.
 
 Exposes a uniform interface (LLMClient.extract_from_pdf) over:
-- Anthropic API via the `anthropic` SDK (default)
-- AWS Bedrock via `boto3` (when LLM_PROVIDER=bedrock or AWS_PROFILE is set)
+- AWS Bedrock via `boto3` (default — typically via IAM role / instance profile)
+- Anthropic API via the `anthropic` SDK (LLM_PROVIDER=anthropic)
 - Disabled mode ("none") which raises LLMDisabledError — used by --no-llm
 
 Singleton: one client instance per process (see get_client()). Thread-safe
@@ -145,11 +145,14 @@ class BedrockClient(LLMClient):
 
         region = os.environ.get("AWS_REGION", "us-east-1")
         try:
+            # boto3 resolves credentials lazily — IAM role / instance profile /
+            # AWS_PROFILE / env keys are all acceptable. Any real auth failure
+            # surfaces on the first invoke_model call and is classified by
+            # _reraise_as_llm_error.
             self.client = boto3.client("bedrock-runtime", region_name=region)
         except Exception as e:
-            raise LLMAuthError(
-                f"Failed to create Bedrock client in region {region}: {e}. "
-                f"Check AWS_PROFILE or AWS_ACCESS_KEY_ID."
+            raise LLMConfigError(
+                f"Failed to create Bedrock client in region {region}: {e}"
             ) from e
 
         self.model_id = model_id or os.environ.get(
@@ -241,9 +244,9 @@ def get_client(provider_override: Optional[str] = None) -> LLMClient:
     Provider selection order:
       1. provider_override arg (CLI --llm-provider)
       2. LLM_PROVIDER env var
-      3. Default: "anthropic"
+      3. Default: "bedrock" (typically via IAM role / instance profile)
 
-    Values: "anthropic", "bedrock", "none"
+    Values: "bedrock", "anthropic", "none"
 
     Thread-safe. First call constructs the client; subsequent calls reuse it
     even across threads.
@@ -257,19 +260,19 @@ def get_client(provider_override: Optional[str] = None) -> LLMClient:
         provider = (
             provider_override
             or os.environ.get("LLM_PROVIDER")
-            or "anthropic"
+            or "bedrock"
         ).lower()
 
-        if provider == "anthropic":
-            client: LLMClient = AnthropicClient()
-        elif provider == "bedrock":
-            client = BedrockClient()
+        if provider == "bedrock":
+            client: LLMClient = BedrockClient()
+        elif provider == "anthropic":
+            client = AnthropicClient()
         elif provider == "none":
             client = DisabledClient()
         else:
             raise LLMConfigError(
                 f"Unknown LLM_PROVIDER={provider!r}. "
-                f"Valid: anthropic, bedrock, none."
+                f"Valid: bedrock, anthropic, none."
             )
 
         _client = client

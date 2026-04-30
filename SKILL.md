@@ -12,7 +12,7 @@ icon: "🧾"
 ## Quick Start
 
 ```bash
-export ANTHROPIC_API_KEY='<your-anthropic-key>'
+# Default: AWS Bedrock via IAM role / instance profile (no credential setup needed on EC2/ECS)
 python3 scripts/download-invoices.py \
     --start 2026/01/01 \
     --end 2026/05/01 \
@@ -33,22 +33,24 @@ python3 scripts/download-invoices.py \
 
 ### LLM Provider（v5.3 新增）
 
-脚本通过 `scripts/core/llm_client.py` adapter 调用 LLM，**默认 Anthropic API**：
+脚本通过 `scripts/core/llm_client.py` adapter 调用 LLM，**默认 AWS Bedrock**（通过 IAM Role / Instance Profile 免凭证）：
 
 ```bash
-# Anthropic console → create API key → paste here
-export ANTHROPIC_API_KEY='<your-anthropic-key>'
-# 可选，默认 claude-sonnet-4-5
-export ANTHROPIC_MODEL=claude-sonnet-4-5
+# 典型场景：EC2 / ECS / Lambda 上 IAM Role 自动生效，无需配置
+# 本地开发：用 AWS_PROFILE 指定命名 profile
+export AWS_REGION=us-east-1                                       # 可选，默认 us-east-1
+export BEDROCK_MODEL_ID=global.anthropic.claude-sonnet-4-5        # 可选
+# export AWS_PROFILE=myprofile                                    # 如本地开发需要
 ```
 
-也支持 AWS Bedrock（如已有基础设施）：
+boto3 按标准优先级解析凭证：环境变量 → `~/.aws/credentials` → IAM Role / Instance Profile → ECS Task Role。
+
+也支持 Anthropic API（如未使用 AWS）：
 
 ```bash
-export LLM_PROVIDER=bedrock
-export AWS_REGION=us-east-1
-export AWS_PROFILE=myprofile    # 或 AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY
-export BEDROCK_MODEL_ID=global.anthropic.claude-sonnet-4-5  # 可选
+export LLM_PROVIDER=anthropic
+export ANTHROPIC_API_KEY='<your-anthropic-key>'
+export ANTHROPIC_MODEL=claude-sonnet-4-5   # 可选
 ```
 
 **调试/成本敏感**：`--no-llm` 或 `--llm-provider=none` 跳过 LLM，所有 PDF 归 UNPARSED。
@@ -404,7 +406,7 @@ switch status:
 | 0 | 全部成功 | — |
 | 1 | 未知错误 | 查 run.log |
 | 2 | Gmail auth 失败 | `run scripts/gmail-auth.py` |
-| 3 | LLM config 失败 | `export ANTHROPIC_API_KEY=...` 或 `LLM_PROVIDER=bedrock` 或 `--no-llm` |
+| 3 | LLM config 失败 | 检查 IAM role / `AWS_PROFILE`，或 `LLM_PROVIDER=anthropic` + `ANTHROPIC_API_KEY`，或 `--no-llm` |
 | 4 | Gmail 配额超限 | 等 60 秒 + `--max-results` 降低 |
 | 5 | 部分成功 | 正常出交付物，但有 UNPARSED 或 failed 项 → 查 missing.json |
 
