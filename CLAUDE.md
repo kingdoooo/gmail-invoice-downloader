@@ -20,9 +20,10 @@ python3 scripts/doctor.py                 # exit 0 = all green, exit 2 = some ch
 # First-time Gmail OAuth (interactive browser flow, writes token.json)
 python3 scripts/gmail-auth.py
 
-# Test suite — all 94 tests run offline with mocked LLM calls in ~2.5s
+# Test suite — 117 tests run offline with mocked LLM + Gmail in ~2.7s
 python3 -m pytest tests/ -q
-python3 -m pytest tests/test_postprocess.py::TestHotelMatchingTiers -v   # run one class
+python3 -m pytest tests/test_postprocess.py::TestHotelMatchingTiers -v   # component tests
+python3 -m pytest tests/test_agent_contract.py -v                        # CLI-boundary Agent contract evals
 python3 -m pytest tests/test_postprocess.py -k "p3_date_only" -v         # run one test
 
 # Reverse-engineer a new invoice platform URL
