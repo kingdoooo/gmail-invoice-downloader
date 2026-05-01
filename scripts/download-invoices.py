@@ -41,6 +41,7 @@ import json
 import os
 import re
 import shutil
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -131,13 +132,19 @@ class GmailClient:
         with open(self.token_path, "w") as f:
             json.dump(self.token, f, indent=2)
 
+    # Transient network errors (SSL EOF, socket timeouts, connection resets)
+    # are retried with exponential backoff. Discovered during 2025Q4 seasonal
+    # smoke: a single SSL UNEXPECTED_EOF_WHILE_READING during attachment fetch
+    # dropped one invoice from iter 1 entirely. The Agent loop recovered it in
+    # iter 2, but that's the wrong layer for a one-off network blip.
+    _TRANSIENT_BACKOFF_SEC = (0.5, 1.0, 2.0)
+
     def _api_get(self, url):
-        for _ in range(2):
+        for _ in range(2):  # 401 → refresh → single retry
             req = urllib.request.Request(url)
             req.add_header("Authorization", f"Bearer {self.token['access_token']}")
             try:
-                with urllib.request.urlopen(req, timeout=30) as resp:
-                    return json.loads(resp.read())
+                return self._fetch_with_transient_retry(req)
             except urllib.error.HTTPError as e:
                 if e.code == 401:
                     self._refresh()
@@ -164,6 +171,29 @@ class GmailClient:
                         ) from e
                 raise
         raise RuntimeError("failed after token refresh")
+
+    def _fetch_with_transient_retry(self, req):
+        """Retry transient network errors (SSL EOF, timeouts, connection
+        resets) with exponential backoff. HTTPError is re-raised immediately
+        so the 401/429/403 handlers in _api_get keep their semantics."""
+        backoffs = self._TRANSIENT_BACKOFF_SEC
+        for i, backoff in enumerate(backoffs):
+            try:
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    return json.loads(resp.read())
+            except urllib.error.HTTPError:
+                raise  # auth / quota / 5xx — handled by caller
+            except (urllib.error.URLError, ssl.SSLError, TimeoutError,
+                    ConnectionError) as e:
+                print(
+                    f"  ⏳ transient network error ({type(e).__name__}), "
+                    f"retry {i + 1}/{len(backoffs)} after {backoff}s: {e}",
+                    file=sys.stderr,
+                )
+                time.sleep(backoff)
+        # Final attempt — let the exception propagate on failure
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read())
 
     def search(self, query, max_results=1000):
         q = urllib.parse.quote(query)

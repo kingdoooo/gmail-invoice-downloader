@@ -111,6 +111,116 @@ def _invoke_main(
 
 
 # =============================================================================
+# Transient network retry contract (discovered via 2025Q4 smoke)
+# =============================================================================
+
+class TestTransientRetryContract:
+    """GmailClient._api_get must transparently retry transient network
+    errors (SSL EOF, TimeoutError, ConnectionError, URLError) with
+    exponential backoff before giving up — without disturbing the
+    401-refresh / 429-quota / 403-quota error-code dispatch.
+
+    Motivation: 2025Q4 seasonal smoke lost one hotel invoice to a single
+    SSL UNEXPECTED_EOF_WHILE_READING during attachment fetch.  The Agent
+    loop recovered it in iter 2, but that's the wrong layer for a one-off
+    blip.  Regression protection: any change that removes this retry loop
+    should fail these tests.
+    """
+
+    def _make_client_with_stubbed_urlopen(
+        self, cli_module, monkeypatch, responses
+    ):
+        """Build a GmailClient whose urlopen returns the next item from
+        `responses` on each call.  A response can be:
+          - bytes: treated as a successful JSON body
+          - an Exception instance: raised
+        """
+        import urllib.request as _ureq
+        it = iter(responses)
+
+        class _FakeResp:
+            def __init__(self, body: bytes):
+                self._body = body
+            def __enter__(self):
+                return self
+            def __exit__(self, *exc):
+                return False
+            def read(self):
+                return self._body
+
+        def fake_urlopen(req, timeout=None):
+            nxt = next(it)
+            if isinstance(nxt, Exception):
+                raise nxt
+            return _FakeResp(nxt)
+
+        monkeypatch.setattr(_ureq, "urlopen", fake_urlopen)
+
+        # Also no-op time.sleep so the test doesn't actually wait 3.5s
+        import time as _time
+        monkeypatch.setattr(_time, "sleep", lambda *_: None)
+
+        # Build a GmailClient without hitting disk
+        client = cli_module.GmailClient.__new__(cli_module.GmailClient)
+        client.creds = {"token_uri": "https://unused"}
+        client.token_path = "/dev/null"
+        client.token = {"access_token": "fake", "refresh_token": "fake"}
+        return client
+
+    def test_transient_ssl_eof_is_retried(self, cli_module, monkeypatch, capsys):
+        """A transient SSL error followed by a 2xx response should succeed
+        with no exception raised to the caller."""
+        import ssl
+        payload = b'{"ok": true}'
+        client = self._make_client_with_stubbed_urlopen(
+            cli_module, monkeypatch,
+            responses=[
+                ssl.SSLEOFError("EOF in handshake"),  # retry 1
+                payload,                              # success
+            ],
+        )
+        result = client._api_get("https://example/test")
+        assert result == {"ok": True}
+        # And stderr should advertise the retry so Agents can trace it
+        stderr = capsys.readouterr().err
+        assert "transient network error" in stderr
+        assert "retry 1/" in stderr
+
+    def test_all_retries_exhausted_raises(self, cli_module, monkeypatch, capsys):
+        """If every retry fails, the last exception must propagate so the
+        caller (download_attachment / main) sees the failure."""
+        import ssl
+        client = self._make_client_with_stubbed_urlopen(
+            cli_module, monkeypatch,
+            # 3 backoffs (0.5/1/2s) + 1 final attempt = 4 failures total
+            responses=[ssl.SSLEOFError("flaky") for _ in range(4)],
+        )
+        with pytest.raises(ssl.SSLEOFError):
+            client._api_get("https://example/test")
+
+    def test_http_error_not_retried_as_transient(
+        self, cli_module, monkeypatch, capsys
+    ):
+        """401/403/429 are HTTPError subclasses — they must reach the
+        original _api_get dispatcher, NOT be caught by the transient-retry
+        wrapper.  Verifying via 429 which must raise GmailQuotaError."""
+        import urllib.error
+        # 429 with Retry-After — _api_get converts this to GmailQuotaError.
+        err = urllib.error.HTTPError(
+            url="https://example", code=429, msg="rate limited",
+            hdrs={"Retry-After": "60"}, fp=None,
+        )
+        client = self._make_client_with_stubbed_urlopen(
+            cli_module, monkeypatch, responses=[err],
+        )
+        with pytest.raises(cli_module.GmailQuotaError):
+            client._api_get("https://example/test")
+        # Should NOT have retried — only 1 urlopen call consumed
+        # (If transient-retry wrongly caught HTTPError, it would loop 4x
+        # and we'd exhaust the responses list with a StopIteration instead.)
+
+
+# =============================================================================
 # R8 — Exit code + REMEDIATION stderr contract
 # =============================================================================
 
