@@ -100,4 +100,5 @@ Integration tests use real anonymized PDFs from `/Users/kentpeng/Documents/agent
 - `SKILL.md` — authoritative user + Agent spec. Read first.
 - `references/setup.md` — Gmail API OAuth setup walkthrough.
 - `references/platforms.md` — per-platform download details (百望云 3 templates, 诺诺网, fapiao.com, xforceplus, 12306, Marriott, etc.) and the 5-step "add a new platform" playbook.
+- `references/seasonal-smoke.md` — quarterly real-Gmail + real-LLM smoke runbook. Complements `tests/test_agent_contract.py` (which runs fully mocked). Run at quarter end, after major refactors, and after LLM provider additions.
 - `learned_exclusions.json` — single source of truth for Gmail `-from:` / `-subject:` exclusion rules. User-editable.
