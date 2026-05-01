@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-`gmail-invoice-downloader` is an OpenClaw Skill (`SKILL.md` is the user-facing spec) that batch-downloads invoices/receipts/folios from Gmail for Chinese expense reimbursement. Current version: **v5.3**.
+`gmail-invoice-downloader` is an OpenClaw Skill (`SKILL.md` is the user-facing spec) that batch-downloads invoices/receipts/folios from Gmail for Chinese expense reimbursement. Current version: **v5.4**.
 
 The canonical user-facing documentation — including every CLI flag, LLM provider setup, the Agent Loop Playbook, Exit Codes table, and Lessons Learned — lives in `SKILL.md`. When answering questions about what the tool does or how a user should invoke it, read `SKILL.md` before inferring.
 
