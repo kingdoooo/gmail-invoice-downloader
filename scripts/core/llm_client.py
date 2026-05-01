@@ -115,7 +115,7 @@ class AnthropicClient(LLMClient):
             kwargs["base_url"] = base_url
         self.client = anthropic.Anthropic(**kwargs)
         self.model = model or os.environ.get(
-            "ANTHROPIC_MODEL", "claude-sonnet-4-5"
+            "ANTHROPIC_MODEL", "claude-sonnet-4-6"
         )
         self.base_url = base_url
 
@@ -293,7 +293,7 @@ class BedrockClient(LLMClient):
             ) from e
 
         self.model_id = model_id or os.environ.get(
-            "BEDROCK_MODEL_ID", "global.anthropic.claude-sonnet-4-5"
+            "BEDROCK_MODEL_ID", "global.anthropic.claude-opus-4-7"
         )
 
     def extract_from_pdf(self, pdf_bytes: bytes, prompt: str) -> str:

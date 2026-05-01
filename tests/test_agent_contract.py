@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sys
 import zipfile
 from pathlib import Path
@@ -346,6 +347,7 @@ class TestMatchingTiersContract:
         self, records: List[Dict[str, Any]], tmp_path: Path, cli_module
     ) -> str:
         matching_result = postprocess.do_all_matching(records)
+        aggregation = postprocess.build_aggregation(matching_result, records)
         report_path = tmp_path / "下载报告.md"
         cli_module.write_report_v53(
             str(report_path),
@@ -356,6 +358,7 @@ class TestMatchingTiersContract:
             date_range=("2026/01/01", "2026/05/01"),
             iteration=1,
             supplemental=False,
+            aggregation=aggregation,
         )
         return report_path.read_text(encoding="utf-8")
 
@@ -407,6 +410,64 @@ class TestMatchingTiersContract:
         report = self._report_for([inv, fol], tmp_path, cli_module)
         # P2 exact match → vendor surfaces in report; no ⚠️ on this row.
         assert "酒店 A" in report
+
+    def test_finance_summary_count_matches_stdout_when_amount_missing(
+        self, tmp_path, cli_module
+    ):
+        """MD 金额汇总 row count must include amount=None rows so it stays in
+        sync with print_openclaw_summary (single-source-of-truth invariant)."""
+        full = {
+            "path": "full.pdf", "valid": True, "category": "MEAL",
+            "ocr": {"transactionAmount": 50.0,
+                    "transactionDate": "2026-03-15",
+                    "vendorName": "V1"},
+        }
+        partial = {
+            "path": "partial.pdf", "valid": True, "category": "MEAL",
+            "ocr": {"transactionAmount": None,
+                    "transactionDate": "2026-03-16",
+                    "vendorName": "V2"},
+        }
+        report = self._report_for([full, partial], tmp_path, cli_module)
+        # Both MEAL rows must count — otherwise MD shows "餐饮 | 1" while
+        # stdout shows "餐饮 2 份" and the finance summary contradicts itself.
+        assert "| 餐饮 | 2 |" in report
+
+    def test_finance_summary_table_contract(self, tmp_path, cli_module):
+        """💰 金额汇总 must appear before 📊 摘要 and show 总计 grand total."""
+        inv = {
+            "path": "inv.pdf", "valid": True, "category": "HOTEL_INVOICE",
+            "ocr": {
+                "transactionAmount": 1280.00,
+                "transactionDate": "2026-03-19",
+                "remark": "HT-F",
+                "vendorName": "某酒店",
+            },
+        }
+        fol = {
+            "path": "fol.pdf", "valid": True, "category": "HOTEL_FOLIO",
+            "ocr": {
+                "balance": 1280.00,
+                "checkOutDate": "2026-03-19",
+                "confirmationNo": "HT-F",
+                "hotelName": "某酒店",
+            },
+        }
+        meal = {
+            "path": "m.pdf", "valid": True, "category": "MEAL",
+            "ocr": {
+                "transactionAmount": 70.00,
+                "transactionDate": "2026-03-20",
+                "vendorName": "某餐厅",
+            },
+        }
+        report = self._report_for([inv, fol, meal], tmp_path, cli_module)
+        assert "## 💰 金额汇总" in report
+        # 💰 must precede 📊
+        assert report.index("## 💰 金额汇总") < report.index("## 📊 摘要")
+        # Grand total line
+        assert "¥1350.00" in report
+        assert "**总计**" in report
 
     def test_p3_date_only_low_confidence_marker(self, tmp_path, cli_module):
         """P1+P2 miss but date matches → P3 fallback + ⚠️ low-confidence marker."""
@@ -781,3 +842,98 @@ class TestZipManifestContract:
 
         with pytest.raises(RuntimeError, match="zip 完整性检查失败"):
             postprocess.zip_output(str(out), dest_dir=str(tmp_path))
+
+
+# =============================================================================
+# Regression — download_link must scope its md5 dedup to this-run-only
+# =============================================================================
+
+class TestDownloadLinkDedupScope:
+    """download_link's in-memory dedup must only compare against ``known_paths``
+    (this run's downloads). Scanning the whole pdfs_dir historically let stale
+    files from previous runs silently swallow new downloads, returning
+    ``([], [])`` and making invoices vanish from step4 without any failed/skipped
+    trace. A 2025-Q3 test run lost ~20% of LINK_BAIWANG invoices this way.
+    """
+
+    def _fake_curl_writing(self, payload: bytes):
+        """Return a subprocess.run stub that writes ``payload`` to the -o path."""
+        import types
+        def _run(cmd, **kwargs):
+            # curl -sL --max-time 60 -o <out> <url>
+            out_path = cmd[cmd.index("-o") + 1]
+            with open(out_path, "wb") as f:
+                f.write(payload)
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        return _run
+
+    def test_stale_file_in_pdfs_dir_does_not_kill_new_download(
+        self, tmp_path, cli_module, monkeypatch
+    ):
+        """Given a stale byte-identical PDF in pdfs/ (as if a prior run left it)
+        and known_paths=[] (this run hasn't downloaded anything yet), download_link
+        must keep the new PDF — the stale file is not a this-run duplicate.
+        """
+        pdfs = tmp_path / "pdfs"
+        pdfs.mkdir()
+        payload = b"%PDF-1.4\nstale-vs-new-identical-bytes"
+        (pdfs / "stale_from_prior_run.pdf").write_bytes(payload)
+
+        monkeypatch.setattr(
+            cli_module.subprocess, "run", self._fake_curl_writing(payload)
+        )
+
+        entry = {
+            "method": "LINK_BAIWANG",
+            "download_url": "https://example.com/fake.pdf",
+            "doc_type": "TAX_INVOICE",
+            "subject": "fake invoice",
+            "message_id": "m1",
+            "internal_date": "1700000000000",
+        }
+        log = open(tmp_path / "run.log", "w")
+        try:
+            d, fl = cli_module.download_link(entry, str(pdfs), log, known_paths=[])
+        finally:
+            log.close()
+
+        assert len(d) == 1, (
+            "stale file in pdfs_dir must not silently drop the new download"
+        )
+        assert fl == []
+        assert os.path.exists(d[0]["path"]), "new file should still exist on disk"
+
+    def test_in_run_duplicate_is_still_deduped(
+        self, tmp_path, cli_module, monkeypatch
+    ):
+        """When known_paths DOES contain a byte-identical file (same run, e.g.
+        ATTACHMENT delivered first + LINK_BAIWANG sent the same PDF after),
+        dedup still collapses the duplicate to avoid both copies entering step4.
+        """
+        pdfs = tmp_path / "pdfs"
+        pdfs.mkdir()
+        payload = b"%PDF-1.4\nthis-run-identical-bytes"
+        earlier = pdfs / "earlier_this_run.pdf"
+        earlier.write_bytes(payload)
+
+        monkeypatch.setattr(
+            cli_module.subprocess, "run", self._fake_curl_writing(payload)
+        )
+
+        entry = {
+            "method": "LINK_BAIWANG",
+            "download_url": "https://example.com/fake.pdf",
+            "doc_type": "TAX_INVOICE",
+            "subject": "fake invoice",
+            "message_id": "m2",
+            "internal_date": "1700000000000",
+        }
+        log = open(tmp_path / "run.log", "w")
+        try:
+            d, fl = cli_module.download_link(
+                entry, str(pdfs), log, known_paths=[str(earlier)]
+            )
+        finally:
+            log.close()
+
+        assert d == [] and fl == [], "in-run byte-identical duplicate must collapse"

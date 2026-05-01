@@ -70,13 +70,16 @@ from invoice_helpers import (  # noqa: E402
 # v5.3 additions
 from postprocess import (  # noqa: E402
     analyze_pdf_batch,
+    build_aggregation,
     rename_by_ocr,
     do_all_matching,
+    print_openclaw_summary,
     write_summary_csv,
     write_missing_json,
     zip_output,
     merge_supplemental_downloads,
     CATEGORY_LABELS,
+    CATEGORY_ORDER,
 )
 from core.llm_client import LLMAuthError, LLMConfigError  # noqa: E402
 
@@ -403,7 +406,7 @@ def download_zip(client, entry, pdfs_dir, log):
     return downloaded, failed
 
 
-def download_link(entry, pdfs_dir, log):
+def download_link(entry, pdfs_dir, log, known_paths=None):
     url = entry.get("download_url")
     if not url:
         return [], [{"subject": entry.get("subject"), "reason": f"{entry['method']} no URL"}]
@@ -445,20 +448,22 @@ def download_link(entry, pdfs_dir, log):
     if r.returncode != 0:
         return [], [{"subject": entry.get("subject"), "reason": f"curl failed: {r.stderr[:150]}", "url": url}]
     ok, info = validate_pdf_header(out)
-    # Dedup: if downloaded content is identical to an existing file in pdfs_dir, drop it
-    if ok:
+    # In-run dedup: if byte-identical to a file we already downloaded this run,
+    # drop the new copy. Scope must be this-run-only — scanning the whole pdfs_dir
+    # would let stale files from previous runs silently swallow new downloads,
+    # which historically hid ~20% of a quarter's LINK_BAIWANG invoices.
+    if ok and known_paths:
         with open(out, "rb") as f:
             new_hash = hashlib.md5(f.read()).hexdigest()
-        for existing in os.listdir(pdfs_dir):
-            ex_path = os.path.join(pdfs_dir, existing)
-            if ex_path == out or not existing.endswith('.pdf'):
+        for ex_path in known_paths:
+            if ex_path == out or not os.path.exists(ex_path):
                 continue
             if os.path.getsize(ex_path) != os.path.getsize(out):
                 continue
             with open(ex_path, "rb") as f:
                 if hashlib.md5(f.read()).hexdigest() == new_hash:
                     os.remove(out)
-                    print(f"  ♻️  duplicate of {existing}, removed {os.path.basename(out)}", file=log)
+                    print(f"  ♻️  duplicate of {os.path.basename(ex_path)}, removed {os.path.basename(out)}", file=log)
                     return [], []
     # v5.3: rename_by_ocr (Step 7) owns final naming. v5.2's pdftotext pre-extraction
     # removed — see download_attachment comment.
@@ -487,9 +492,14 @@ def write_report_v53(
     date_range,
     iteration: int,
     supplemental: bool,
+    aggregation=None,
 ):
     """Emit 下载报告.md reflecting v5.3 matching (P1/P2/P3 + ride-hailing + unparsed)
-    and supplemental loop context."""
+    and supplemental loop context.
+
+    If ``aggregation`` is provided, a ``## 💰 金额汇总`` block is inserted
+    before ``## 📊 摘要``. Legacy callers that pass None skip that block.
+    """
     now = datetime.datetime.now(CST)
     valid = [d for d in downloaded_all if d.get("valid")]
 
@@ -508,6 +518,38 @@ def write_report_v53(
     lines.append("- 网约车：金额 0.01 容差 + 文件名序号消歧")
     lines.append("- 餐饮发票不自动匹配（开票日 ≠ 就餐日）")
     lines.append("")
+
+    # ── 💰 金额汇总 (aggregated totals) ──
+    if aggregation is not None:
+        lines.append("## 💰 金额汇总\n")
+        lines.append("| 类别 | 数量 | 小计 |")
+        lines.append("|------|------|------|")
+        subtotals = aggregation["subtotals"]
+        for cat in sorted(subtotals.keys(),
+                          key=lambda c: CATEGORY_ORDER.get(c, 50)):
+            # Count every row in this category — matches stdout (per_cat_counts
+            # in print_openclaw_summary) and the CSV detail section. Using the
+            # subtotal-only filter here would desync MD with the other two
+            # writers for categories that contain an amount=None row.
+            count = sum(1 for r in aggregation["rows"] if r.category == cat)
+            lines.append(
+                f"| {CATEGORY_LABELS.get(cat, cat)} | {count} | "
+                f"¥{subtotals[cat]:.2f} |"
+            )
+        lines.append(
+            f"| **总计** | {aggregation['voucher_count']} | "
+            f"**¥{aggregation['grand_total']:.2f}** |"
+        )
+        # R13 footnote — condition must match the OpenClaw message footnote
+        # (low_conf.count > 0) so CSV/MD/stdout stay in sync.
+        low = aggregation["low_conf"]
+        if low["count"] > 0:
+            lines.append("")
+            lines.append(
+                f"† 其中 {low['count']} 项金额存疑（可信度=low，合计 "
+                f"¥{low['amount']:.2f}），见末尾「⚠️ 需人工核查」区"
+            )
+        lines.append("")
 
     # ── Summary table ──
     lines.append("## 📊 摘要\n")
@@ -886,7 +928,8 @@ def main():
             elif method in ("LINK_FAPIAO_COM", "LINK_XFORCEPLUS", "LINK_BAIWANG",
                             "LINK_NUONUO", "LINK_CHINATAX", "LINK_BWJF",
                             "LINK_JINCAI", "LINK_KERUYUN"):
-                d, fl = download_link(c, pdfs_dir, log)
+                known_paths = [r["path"] for r in downloaded if r.get("path")]
+                d, fl = download_link(c, pdfs_dir, log, known_paths=known_paths)
             else:
                 d, fl = [], [{"subject": c.get("subject"), "reason": f"unknown method {method}"}]
             downloaded.extend(d)
@@ -968,6 +1011,17 @@ def main():
             json.dump({"downloaded": downloaded_all, "failed": failed, "skipped": skipped},
                       f, ensure_ascii=False, indent=2, default=str)
 
+    # --- Step 8.5: build aggregation (single source for CSV/MD/message) ---
+    # do_all_matching physically dedupes OCR-business-key duplicates; exclude
+    # those from valid_records so build_aggregation's completeness assertion
+    # sees the same record set the matching buckets were populated from.
+    dedup_removed_ids = {id(r) for r in matching_result.get("dedup_removed", [])}
+    valid_records = [
+        d for d in downloaded_all
+        if d.get("valid") and id(d) not in dedup_removed_ids
+    ]
+    aggregation = build_aggregation(matching_result, valid_records)
+
     # --- Step 9a: write 下载报告.md ---
     report_path = os.path.join(output_dir, "下载报告.md")
     write_report_v53(
@@ -977,12 +1031,13 @@ def main():
         date_range=(args.start, args.end),
         iteration=iteration,
         supplemental=args.supplemental,
+        aggregation=aggregation,
     )
     say(f"\n✅ Report:   {report_path}")
 
     # --- Step 9b: write 发票汇总.csv ---
     csv_path = os.path.join(output_dir, "发票汇总.csv")
-    n_csv = write_summary_csv(csv_path, [d for d in downloaded_all if d.get("valid")])
+    n_csv = write_summary_csv(csv_path, aggregation)
     say(f"✅ CSV:      {csv_path}  ({n_csv} rows)")
 
     # --- Step 9c: write missing.json ---
@@ -1001,7 +1056,8 @@ def main():
         f"(status={missing_payload['status']}, next={missing_payload['recommended_next_action']}, "
         f"items={len(missing_payload['items'])})")
 
-    # --- Step 10: zip the output dir ---
+    # --- Step 10: zip the output dir (DEC-6: degrade to None on failure) ---
+    zip_path = None
     try:
         zip_path = zip_output(output_dir)
         say(f"✅ Zip:      {zip_path}")
@@ -1009,6 +1065,21 @@ def main():
         say(f"⚠️  zip skipped: {e}")
 
     say(f"\n✅ PDFs:     {pdfs_dir}/ ({sum(1 for d in downloaded_all if d.get('valid'))} files)")
+
+    # --- Step 11: OpenClaw chat summary (stdout + run.log). MUST be called
+    #     before log.close() — writer=say dual-writes to the still-open log.
+    say("")
+    print_openclaw_summary(
+        aggregation,
+        output_dir=output_dir,
+        zip_path=zip_path,
+        csv_path=csv_path,
+        md_path=report_path,
+        log_path=log_path,
+        missing_status=missing_payload["recommended_next_action"],
+        date_range=(args.start, args.end),
+        writer=say,
+    )
 
     # --- Exit code ---
     has_unparsed = any(d.get("category") == "UNPARSED" for d in downloaded_all if d.get("valid"))

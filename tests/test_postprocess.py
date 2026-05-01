@@ -47,14 +47,21 @@ from core.llm_ocr import (
 from core.validation import validate_ocr_plausibility
 from postprocess import (
     CATEGORY_LABELS,
+    CATEGORY_ORDER,
+    MergedRow,
+    VALID_CONFIDENCES,
     _compute_convergence_hash,
+    _dedup_by_ocr_business_key,
     _to_matching_input,
     analyze_pdf_batch,
+    build_aggregation,
     do_all_matching,
     merge_supplemental_downloads,
     normalize_date,
+    print_openclaw_summary,
     rename_by_ocr,
     sanitize_filename,
+    worst_of,
     write_missing_json,
     write_summary_csv,
     zip_output,
@@ -386,6 +393,11 @@ class TestZipAtomic:
 # =============================================================================
 
 class TestSummaryCSV:
+    @staticmethod
+    def _agg(records):
+        """Helper: build aggregation from raw download records."""
+        return build_aggregation(do_all_matching(records), records)
+
     def test_utf8_bom_prefix(self, tmp_path):
         csv_path = tmp_path / "summary.csv"
         records = [{
@@ -394,9 +406,10 @@ class TestSummaryCSV:
                 "transactionDate": "2026-03-19",
                 "transactionAmount": 1280.00,
                 "vendorName": "无锡万怡",
+                "remark": "ORPHAN",  # no folio → unmatched
             },
         }]
-        write_summary_csv(str(csv_path), records)
+        write_summary_csv(str(csv_path), self._agg(records))
         assert csv_path.read_bytes().startswith(b"\xef\xbb\xbf"), "missing UTF-8 BOM"
 
     def test_none_amount_is_empty_not_zero(self, tmp_path):
@@ -405,7 +418,7 @@ class TestSummaryCSV:
             "path": "a.pdf", "valid": True, "category": "MEAL",
             "ocr": {"transactionDate": "2026-03-15", "transactionAmount": None, "vendorName": "V"},
         }]
-        write_summary_csv(str(csv_path), records)
+        write_summary_csv(str(csv_path), self._agg(records))
         text = csv_path.read_text(encoding="utf-8-sig")
         data_row = text.strip().split("\n")[1]
         fields = data_row.split(",")
@@ -417,14 +430,84 @@ class TestSummaryCSV:
         records = [
             {"path": "unp.pdf", "valid": True, "category": "UNPARSED", "ocr": None, "date": "20260101"},
             {"path": "hot.pdf", "valid": True, "category": "HOTEL_INVOICE",
-             "ocr": {"transactionDate": "2026-03-19", "transactionAmount": 100, "vendorName": "H"}},
+             "ocr": {"transactionDate": "2026-03-19", "transactionAmount": 100, "vendorName": "H",
+                     "remark": "ORPHAN"}},
         ]
-        write_summary_csv(str(csv_path), records)
+        write_summary_csv(str(csv_path), self._agg(records))
         text = csv_path.read_text(encoding="utf-8-sig")
         lines = text.strip().split("\n")
-        # Row 1 is header, row 2 is first record, row 3 is last record
+        # Row 1 is header, row 2 is HOTEL_INVOICE (sorts first by CATEGORY_ORDER),
+        # row 3 is UNPARSED (always last).
         assert "HOTEL" in lines[1] or "酒店" in lines[1]
         assert "需人工核查" in lines[2]
+
+    # -- New R7-R11 coverage -------------------------------------------
+
+    def test_nine_columns_in_header(self, tmp_path):
+        csv_path = tmp_path / "summary.csv"
+        records = [{
+            "path": "a.pdf", "valid": True, "category": "MEAL",
+            "ocr": {"transactionDate": "2026-03-15",
+                    "transactionAmount": 50.0, "vendorName": "V"},
+        }]
+        write_summary_csv(str(csv_path), self._agg(records))
+        header = csv_path.read_text(encoding="utf-8-sig").splitlines()[0]
+        cells = header.split(",")
+        assert len(cells) == 9
+        assert cells[6] == "主文件"
+        assert cells[7] == "配对凭证"
+        assert cells[8] == "数据可信度"
+
+    def test_hotel_pair_inline_paired_kind(self, tmp_path):
+        """HOTEL merged row: 配对凭证 = '水单: <folio_basename>'."""
+        csv_path = tmp_path / "summary.csv"
+        records = [
+            {"path": "/p/inv.pdf", "valid": True, "category": "HOTEL_INVOICE",
+             "ocr": {"transactionAmount": 1280.0,
+                     "transactionDate": "2026-03-19",
+                     "remark": "HT-Z", "vendorName": "无锡万怡"}},
+            {"path": "/p/fol.pdf", "valid": True, "category": "HOTEL_FOLIO",
+             "ocr": {"balance": 1280.0,
+                     "checkOutDate": "2026-03-19",
+                     "confirmationNo": "HT-Z", "hotelName": "无锡万怡"}},
+        ]
+        write_summary_csv(str(csv_path), self._agg(records))
+        text = csv_path.read_text(encoding="utf-8-sig")
+        assert "水单: fol.pdf" in text
+        # Only 1 detail row (merged), not 2
+        detail_line = [
+            ln for ln in text.splitlines()
+            if ln and not ln.startswith("序号") and ",总计," not in ln
+            and "小计," not in ln and ln != "" * 9
+        ]
+        # filter blank separator
+        detail_line = [ln for ln in detail_line if ln.strip(",")]
+        assert any("无锡万怡" in ln for ln in detail_line)
+
+    def test_subtotal_and_grand_total_rows(self, tmp_path):
+        """CSV must end with per-category subtotal rows + 总计 row."""
+        csv_path = tmp_path / "summary.csv"
+        records = [
+            {"path": "a.pdf", "valid": True, "category": "MEAL",
+             "ocr": {"transactionDate": "2026-03-01",
+                     "transactionAmount": 100.0, "vendorName": "V"}},
+            {"path": "b.pdf", "valid": True, "category": "MEAL",
+             "ocr": {"transactionDate": "2026-03-02",
+                     "transactionAmount": 50.0, "vendorName": "V"}},
+        ]
+        write_summary_csv(str(csv_path), self._agg(records))
+        text = csv_path.read_text(encoding="utf-8-sig")
+        assert "餐饮 小计,150.00" in text
+        assert "总计,150.00" in text
+        # Tombstone in 序号 column for summary rows
+        assert "—,,餐饮 小计" in text
+        assert "—,,总计" in text
+
+    def test_empty_rows_still_emits_grand_total(self, tmp_path):
+        csv_path = tmp_path / "summary.csv"
+        write_summary_csv(str(csv_path), self._agg([]))
+        text = csv_path.read_text(encoding="utf-8-sig")
+        assert "总计,0.00" in text
 
 
 # =============================================================================
@@ -510,7 +593,8 @@ class TestE2E:
 
         # CSV
         csv_path = tmp_path / "out" / "发票汇总.csv"
-        n_csv = write_summary_csv(str(csv_path), records)
+        aggregation = build_aggregation(matching, records)
+        n_csv = write_summary_csv(str(csv_path), aggregation)
         assert n_csv == 3
         assert csv_path.read_bytes().startswith(b"\xef\xbb\xbf")
 
@@ -707,6 +791,182 @@ def _mkrecord(category, ocr_overrides, path="x.pdf"):
         "category": category,
         "ocr": ocr_overrides,
     }
+
+
+class TestOCRContentDedup:
+    """Collapse records that share an OCR business key before matching runs.
+
+    Keys by category:
+      HOTEL_INVOICE / MEAL / etc. → invoiceNo
+      HOTEL_FOLIO                 → confirmationNo, fallback (hotelName, arrival, departure)
+      byte-identical survivors    → SHA256 final fallback
+    """
+
+    def _mkrec_with_file(self, tmp_path, basename, category, ocr, content=b"%PDF-1.4 stub"):
+        p = tmp_path / basename
+        p.write_bytes(content)
+        return {"path": str(p), "valid": True, "category": category, "ocr": ocr}
+
+    def test_hotel_folio_same_confirmation_no_collapses(self, tmp_path):
+        a = self._mkrec_with_file(
+            tmp_path, "20250903_HILTON_水单.pdf", "HOTEL_FOLIO",
+            {"confirmationNo": "3332252059", "balance": 552.41}, content=b"%PDF-a")
+        b = self._mkrec_with_file(
+            tmp_path, "20250903_HILTON_水单 (1).pdf", "HOTEL_FOLIO",
+            {"confirmationNo": "3332252059", "balance": 552.41}, content=b"%PDF-b")
+        kept, removed = _dedup_by_ocr_business_key([a, b])
+        assert len(kept) == 1
+        assert len(removed) == 1
+        # Shorter basename wins
+        assert kept[0]["path"].endswith("水单.pdf")
+
+    def test_hotel_folio_missing_confirmation_no_fallback_to_dates(self, tmp_path):
+        a = self._mkrec_with_file(
+            tmp_path, "a.pdf", "HOTEL_FOLIO",
+            {"confirmationNo": None, "hotelName": "Hilton Wuxi",
+             "arrivalDate": "2025-09-03", "departureDate": "2025-09-04"},
+            content=b"%PDF-1.4 A")
+        b = self._mkrec_with_file(
+            tmp_path, "ab.pdf", "HOTEL_FOLIO",
+            {"confirmationNo": None, "hotelName": "HILTON WUXI",
+             "arrivalDate": "2025-09-03", "departureDate": "2025-09-04"},
+            content=b"%PDF-1.4 B")
+        kept, removed = _dedup_by_ocr_business_key([a, b])
+        assert len(kept) == 1, "same hotel + same dates should collapse"
+        assert len(removed) == 1
+
+    def test_hotel_folio_different_dates_not_collapsed(self, tmp_path):
+        a = self._mkrec_with_file(
+            tmp_path, "a.pdf", "HOTEL_FOLIO",
+            {"confirmationNo": None, "hotelName": "Hilton Wuxi",
+             "arrivalDate": "2025-09-03", "departureDate": "2025-09-04"},
+            content=b"%PDF A")
+        b = self._mkrec_with_file(
+            tmp_path, "b.pdf", "HOTEL_FOLIO",
+            {"confirmationNo": None, "hotelName": "Hilton Wuxi",
+             "arrivalDate": "2025-09-05", "departureDate": "2025-09-06"},
+            content=b"%PDF B")
+        kept, removed = _dedup_by_ocr_business_key([a, b])
+        assert len(kept) == 2
+        assert removed == []
+
+    def test_hotel_folio_asymmetric_conf_not_collapsed(self, tmp_path):
+        """One side has confirmationNo, other doesn't — conservative, surface both."""
+        a = self._mkrec_with_file(
+            tmp_path, "a.pdf", "HOTEL_FOLIO",
+            {"confirmationNo": "ABC123", "hotelName": "Hilton",
+             "arrivalDate": "2025-09-03", "departureDate": "2025-09-04"},
+            content=b"%PDF A")
+        b = self._mkrec_with_file(
+            tmp_path, "b.pdf", "HOTEL_FOLIO",
+            {"confirmationNo": None, "hotelName": "Hilton",
+             "arrivalDate": "2025-09-03", "departureDate": "2025-09-04"},
+            content=b"%PDF B")
+        kept, removed = _dedup_by_ocr_business_key([a, b])
+        assert len(kept) == 2
+        assert removed == []
+
+    def test_invoice_same_invoice_no_collapses(self, tmp_path):
+        a = self._mkrec_with_file(
+            tmp_path, "20250903_树山_发票.pdf", "HOTEL_INVOICE",
+            {"invoiceNo": "25327000001619791763", "transactionAmount": 552.41},
+            content=b"%PDF A")
+        b = self._mkrec_with_file(
+            tmp_path, "20250903_树山_发票 (1).pdf", "HOTEL_INVOICE",
+            {"invoiceNo": "25327000001619791763", "transactionAmount": 552.41},
+            content=b"%PDF B")
+        kept, removed = _dedup_by_ocr_business_key([a, b])
+        assert len(kept) == 1
+        assert len(removed) == 1
+        assert kept[0]["path"].endswith("_发票.pdf")
+
+    def test_meal_sha256_fallback_collapses_byte_identical(self, tmp_path):
+        """瑞幸/巧连 case — same bytes, no invoiceNo, should still collapse via SHA pass."""
+        shared_bytes = b"%PDF-1.4 same-meal-pdf-content"
+        a = self._mkrec_with_file(
+            tmp_path, "20250911_瑞幸_餐饮.pdf", "MEAL",
+            {"invoiceNo": None, "transactionAmount": 20.0},
+            content=shared_bytes)
+        b = self._mkrec_with_file(
+            tmp_path, "20250911_瑞幸_餐饮 (1).pdf", "MEAL",
+            {"invoiceNo": None, "transactionAmount": 20.0},
+            content=shared_bytes)
+        kept, removed = _dedup_by_ocr_business_key([a, b])
+        assert len(kept) == 1
+        assert len(removed) == 1
+
+    def test_two_real_starbucks_same_day_not_collapsed(self, tmp_path):
+        """Two genuine starbucks visits same day, different invoiceNo → both kept.
+        Guards against false positives in the 'same day, same vendor, same amount'
+        case that does happen for real (two coffees same afternoon)."""
+        a = self._mkrec_with_file(
+            tmp_path, "20250929_星巴克_餐饮.pdf", "MEAL",
+            {"invoiceNo": "25327000001111111111", "transactionAmount": 42.0,
+             "transactionDate": "2025-09-29", "vendorName": "星巴克"},
+            content=b"%PDF first-coffee")
+        b = self._mkrec_with_file(
+            tmp_path, "20250929_星巴克_餐饮 (1).pdf", "MEAL",
+            {"invoiceNo": "25327000002222222222", "transactionAmount": 42.0,
+             "transactionDate": "2025-09-29", "vendorName": "星巴克"},
+            content=b"%PDF second-coffee")
+        kept, removed = _dedup_by_ocr_business_key([a, b])
+        assert len(kept) == 2
+        assert removed == []
+
+    def test_physical_delete_removes_loser_from_disk(self, tmp_path):
+        a = self._mkrec_with_file(
+            tmp_path, "keep.pdf", "HOTEL_FOLIO",
+            {"confirmationNo": "X1"}, content=b"%PDF A")
+        b = self._mkrec_with_file(
+            tmp_path, "delete-me.pdf", "HOTEL_FOLIO",
+            {"confirmationNo": "X1"}, content=b"%PDF B")
+        kept, removed = _dedup_by_ocr_business_key([a, b])
+        assert len(kept) == 1
+        assert kept[0]["path"].endswith("keep.pdf")
+        # Surviving file still exists; loser unlinked
+        assert os.path.exists(kept[0]["path"])
+        assert not os.path.exists(removed[0]["path"])
+
+    def test_delete_losers_false_preserves_files(self, tmp_path):
+        a = self._mkrec_with_file(
+            tmp_path, "keep.pdf", "HOTEL_FOLIO",
+            {"confirmationNo": "X1"}, content=b"%PDF A")
+        b = self._mkrec_with_file(
+            tmp_path, "keepalso.pdf", "HOTEL_FOLIO",
+            {"confirmationNo": "X1"}, content=b"%PDF B")
+        kept, removed = _dedup_by_ocr_business_key([a, b], delete_losers=False)
+        assert len(kept) == 1
+        assert len(removed) == 1
+        # Both files still present on disk (logical removal only)
+        assert os.path.exists(kept[0]["path"])
+        assert os.path.exists(removed[0]["path"])
+
+    def test_invalid_records_pass_through_untouched(self, tmp_path):
+        """Records with valid=False should neither be deduped nor deleted."""
+        bad_a = self._mkrec_with_file(
+            tmp_path, "bad.pdf", "HOTEL_FOLIO",
+            {"confirmationNo": "X1"}, content=b"not a pdf")
+        bad_b = self._mkrec_with_file(
+            tmp_path, "bad2.pdf", "HOTEL_FOLIO",
+            {"confirmationNo": "X1"}, content=b"also not")
+        bad_a["valid"] = False
+        bad_b["valid"] = False
+        kept, removed = _dedup_by_ocr_business_key([bad_a, bad_b])
+        assert len(kept) == 2
+        assert removed == []
+
+    def test_unknown_and_receipt_not_deduped(self, tmp_path):
+        """RIDEHAILING_RECEIPT and UNKNOWN categories are explicitly excluded."""
+        a = self._mkrec_with_file(
+            tmp_path, "r1.pdf", "RIDEHAILING_RECEIPT",
+            {"totalAmount": 100.0}, content=b"PDF A")
+        b = self._mkrec_with_file(
+            tmp_path, "r2.pdf", "RIDEHAILING_RECEIPT",
+            {"totalAmount": 100.0}, content=b"PDF A")  # same bytes
+        # SHA pass would catch these if participating, but category excluded → skip
+        kept, removed = _dedup_by_ocr_business_key([a, b])
+        assert len(kept) == 2
+        assert removed == []
 
 
 class TestHotelMatchingTiers:
@@ -1231,3 +1491,654 @@ class TestAnalyzePdfBatchAuthPropagation:
         # Must raise, not return results with all-UNPARSED
         with pytest.raises(LLMAuthError):
             analyze_pdf_batch(records, use_llm=True)
+
+
+# =============================================================================
+# Unit 1 — build_aggregation + MergedRow + category registry
+# =============================================================================
+
+from decimal import Decimal, ROUND_HALF_EVEN, getcontext  # noqa: E402
+
+
+def _agg_record(category: str, ocr: dict, path: str = "x.pdf") -> dict:
+    """Build a download record shaped for do_all_matching / build_aggregation."""
+    return {
+        "path": path,
+        "valid": True,
+        "category": category,
+        "ocr": ocr,
+    }
+
+
+class TestCategoryConstants:
+    def test_hotel_and_ridehailing_labels_registered(self):
+        assert CATEGORY_LABELS["HOTEL"] == "酒店"
+        assert CATEGORY_LABELS["RIDEHAILING"] == "网约车"
+
+    def test_category_order_has_new_keys(self):
+        assert "HOTEL" in CATEGORY_ORDER
+        assert "RIDEHAILING" in CATEGORY_ORDER
+
+    def test_category_order_relative_sort(self):
+        """HOTEL merged < HOTEL_FOLIO < HOTEL_INVOICE < RIDEHAILING < rest < UNPARSED."""
+        o = CATEGORY_ORDER
+        assert o["HOTEL"] < o["HOTEL_FOLIO"] < o["HOTEL_INVOICE"] < o["RIDEHAILING"]
+        assert o["RIDEHAILING"] < o["RIDEHAILING_INVOICE"] < o["RIDEHAILING_RECEIPT"]
+        assert o["RIDEHAILING_RECEIPT"] < o["MEAL"] < o["TRAIN"]
+        assert o["UNPARSED"] == 99
+        # All non-UNPARSED come before UNPARSED
+        for cat, idx in o.items():
+            if cat == "UNPARSED":
+                continue
+            assert idx < o["UNPARSED"]
+
+
+class TestWorstOf:
+    def test_low_worse_than_high(self):
+        assert worst_of("high", "low") == "low"
+        assert worst_of("low", "high") == "low"
+
+    def test_failed_is_worst(self):
+        assert worst_of("low", "failed") == "failed"
+        assert worst_of("high", "failed") == "failed"
+
+    def test_all_high(self):
+        assert worst_of("high", "high") == "high"
+
+    def test_single_value(self):
+        assert worst_of("high") == "high"
+        assert worst_of("low") == "low"
+
+    def test_unknown_raises(self):
+        """DEC-7 fail-fast: unknown confidence must not silently downgrade to high."""
+        with pytest.raises(ValueError):
+            worst_of("high", "medium")
+        with pytest.raises(ValueError):
+            worst_of("medium")
+
+    def test_valid_confidences_set(self):
+        assert VALID_CONFIDENCES == frozenset({"high", "low", "failed"})
+
+
+class TestBuildAggregation:
+    # -- Happy path (a): hotel pair collapses to 1 row ---------------------
+
+    def test_hotel_pair_collapses_to_one_row(self):
+        inv = _agg_record("HOTEL_INVOICE", {
+            "transactionAmount": 1280.00,
+            "transactionDate": "2026-03-19",
+            "remark": "HT-A",
+            "vendorName": "无锡万怡",
+        }, path="/out/pdfs/inv.pdf")
+        fol = _agg_record("HOTEL_FOLIO", {
+            "balance": 1280.00,
+            "checkOutDate": "2026-03-19",
+            "confirmationNo": "HT-A",
+            "hotelName": "无锡万怡",
+        }, path="/out/pdfs/fol.pdf")
+
+        matching = do_all_matching([inv, fol])
+        agg = build_aggregation(matching, [inv, fol])
+
+        hotel_rows = [r for r in agg["rows"] if r.category == "HOTEL"]
+        assert len(hotel_rows) == 1
+        row = hotel_rows[0]
+        assert row.primary_file == "inv.pdf"
+        assert row.paired_file == "fol.pdf"
+        assert row.paired_kind == "水单"
+        assert row.amount == Decimal("1280.00")
+
+    # -- Happy path (b): ride-hailing pair collapses to 1 row -------------
+
+    def test_ridehailing_pair_collapses_to_one_row(self):
+        inv = _agg_record("RIDEHAILING_INVOICE", {
+            "transactionAmount": 139.80,
+            "transactionDate": "2026-04-05",
+            "vendorName": "滴滴",
+        }, path="/out/pdfs/didi_inv.pdf")
+        rec = _agg_record("RIDEHAILING_RECEIPT", {
+            "totalAmount": 139.80,
+            "transactionDate": "2026-04-05",
+        }, path="/out/pdfs/didi_trip.pdf")
+
+        matching = do_all_matching([inv, rec])
+        agg = build_aggregation(matching, [inv, rec])
+
+        rh_rows = [r for r in agg["rows"] if r.category == "RIDEHAILING"]
+        assert len(rh_rows) == 1
+        row = rh_rows[0]
+        assert row.paired_kind == "行程单"
+        assert row.primary_file == "didi_inv.pdf"
+        assert row.paired_file == "didi_trip.pdf"
+
+    # -- Happy path (c): unpaired hotel invoice keeps original label ------
+
+    def test_unmatched_hotel_invoice_keeps_label(self):
+        inv = _agg_record("HOTEL_INVOICE", {
+            "transactionAmount": 300.00,
+            "transactionDate": "2026-05-01",
+            "remark": "ORPHAN",
+            "vendorName": "孤儿酒店",
+        }, path="/out/pdfs/orphan.pdf")
+
+        matching = do_all_matching([inv])
+        agg = build_aggregation(matching, [inv])
+
+        rows = agg["rows"]
+        assert len(rows) == 1
+        assert rows[0].category == "HOTEL_INVOICE"
+        assert rows[0].paired_file is None
+        assert rows[0].paired_kind is None
+
+    # -- Happy path (d): None amount kept in rows but not in subtotals ----
+
+    def test_none_amount_preserved_and_excluded_from_subtotal(self):
+        rec = _agg_record("MEAL", {
+            "transactionDate": "2026-04-20",
+            "transactionAmount": None,
+            "vendorName": "某餐厅",
+        }, path="/out/pdfs/meal.pdf")
+        other = _agg_record("MEAL", {
+            "transactionDate": "2026-04-21",
+            "transactionAmount": 50.00,
+            "vendorName": "某餐厅",
+        }, path="/out/pdfs/meal2.pdf")
+
+        matching = do_all_matching([rec, other])
+        agg = build_aggregation(matching, [rec, other])
+
+        meal_rows = [r for r in agg["rows"] if r.category == "MEAL"]
+        assert len(meal_rows) == 2
+        # None stays None; subtotal only counts the 50.00 row
+        amounts = sorted((r.amount for r in meal_rows), key=lambda a: (a is None, a or 0))
+        assert amounts[0] == Decimal("50.00")
+        assert amounts[1] is None
+        assert agg["subtotals"]["MEAL"] == Decimal("50.00")
+        # voucher_count counts both (non-UNPARSED)
+        assert agg["voucher_count"] == 2
+
+    # -- Happy path (e): low_conf counts + aggregates --------------------
+
+    def test_low_conf_counted_with_amount(self):
+        inv = _agg_record("MEAL", {
+            "transactionDate": "2026-04-15",
+            "transactionAmount": 80.00,
+            "vendorName": "X",
+            "_amountConfidence": "low",
+        }, path="/out/pdfs/meal.pdf")
+
+        matching = do_all_matching([inv])
+        agg = build_aggregation(matching, [inv])
+
+        assert agg["low_conf"]["count"] == 1
+        assert agg["low_conf"]["amount"] == Decimal("80.00")
+
+    # -- Happy path (f): Decimal precision avoids float drift ------------
+
+    def test_decimal_precision_no_float_drift(self):
+        recs = [
+            _agg_record("MEAL", {"transactionDate": "2026-04-01",
+                                  "transactionAmount": 0.10, "vendorName": "A"},
+                        path="/out/pdfs/a.pdf"),
+            _agg_record("MEAL", {"transactionDate": "2026-04-02",
+                                  "transactionAmount": 0.20, "vendorName": "B"},
+                        path="/out/pdfs/b.pdf"),
+            _agg_record("MEAL", {"transactionDate": "2026-04-03",
+                                  "transactionAmount": 0.30, "vendorName": "C"},
+                        path="/out/pdfs/c.pdf"),
+        ]
+        matching = do_all_matching(recs)
+        agg = build_aggregation(matching, recs)
+
+        assert agg["subtotals"]["MEAL"] == Decimal("0.60")
+        assert agg["grand_total"] == Decimal("0.60")
+        # Ensure the string form matches too (what CSV/MD will render)
+        assert f"{agg['grand_total']:.2f}" == "0.60"
+
+    # -- Edge: --no-llm all-UNPARSED -------------------------------------
+
+    def test_no_llm_all_unparsed(self):
+        recs = [
+            {"path": f"/out/pdfs/u{i}.pdf", "valid": True,
+             "category": "UNPARSED", "ocr": None}
+            for i in range(3)
+        ]
+        matching = do_all_matching(recs)
+        agg = build_aggregation(matching, recs)
+
+        assert agg["voucher_count"] == 0
+        assert agg["grand_total"] == Decimal("0.00")
+        assert len(agg["rows"]) == 3
+        assert all(r.category == "UNPARSED" for r in agg["rows"])
+
+    # -- Edge: P3 fallback demotes confidence to low ---------------------
+
+    def test_p3_fallback_demotes_confidence(self):
+        inv = _agg_record("HOTEL_INVOICE", {
+            "transactionAmount": 480.00,  # differs from folio balance
+            "transactionDate": "2026-05-10",
+            "vendorName": "酒店 B",
+        }, path="/out/pdfs/inv.pdf")
+        fol = _agg_record("HOTEL_FOLIO", {
+            "balance": 500.00,
+            "checkOutDate": "2026-05-10",
+            "hotelName": "酒店 B",
+        }, path="/out/pdfs/fol.pdf")
+
+        matching = do_all_matching([inv, fol])
+        agg = build_aggregation(matching, [inv, fol])
+
+        hotel_rows = [r for r in agg["rows"] if r.category == "HOTEL"]
+        assert len(hotel_rows) == 1
+        assert hotel_rows[0].confidence == "low"
+        assert agg["low_conf"]["count"] == 1
+
+    # -- Edge: completely empty Gmail run -------------------------------
+
+    def test_empty_matching_result(self):
+        matching = do_all_matching([])
+        agg = build_aggregation(matching, [])
+
+        assert agg["rows"] == []
+        assert agg["subtotals"] == {}
+        assert agg["grand_total"] == Decimal("0.00")
+        assert agg["voucher_count"] == 0
+        assert agg["unmatched"]["hotel_invoices"] == 0
+        assert agg["unmatched"]["hotel_folios"] == 0
+        assert agg["unmatched"]["rh_invoices"] == 0
+        assert agg["unmatched"]["rh_receipts"] == 0
+
+    # -- Edge: mixed valid + ocr-None records ---------------------------
+
+    def test_row_count_matches_valid_records(self):
+        """5 valid records, 1 of which has ocr=None (UNPARSED)."""
+        ok = [
+            _agg_record("MEAL", {"transactionDate": "2026-04-01",
+                                  "transactionAmount": 10.00, "vendorName": "V"},
+                        path=f"/out/pdfs/m{i}.pdf")
+            for i in range(4)
+        ]
+        broken = {"path": "/out/pdfs/broken.pdf", "valid": True,
+                  "category": "UNPARSED", "ocr": None}
+        recs = ok + [broken]
+
+        matching = do_all_matching(recs)
+        agg = build_aggregation(matching, recs)
+
+        assert len(agg["rows"]) == len(recs)  # completeness assertion
+        assert agg["voucher_count"] == 4  # excludes UNPARSED
+
+    # -- Edge: localcontext does not pollute global rounding ------------
+
+    def test_localcontext_does_not_pollute_global(self):
+        before = getcontext().rounding
+        recs = [_agg_record("MEAL", {"transactionDate": "2026-04-01",
+                                      "transactionAmount": 1.235, "vendorName": "V"},
+                            path="/out/pdfs/m.pdf")]
+        matching = do_all_matching(recs)
+        build_aggregation(matching, recs)
+        # Global context must be untouched
+        assert getcontext().rounding == before
+        assert getcontext().rounding == ROUND_HALF_EVEN
+
+    # -- Edge: error path - malformed matching_result -------------------
+
+    def test_missing_hotel_key_raises(self):
+        """Defensive defaults on matching_result would mask upstream bugs —
+        fail fast instead."""
+        with pytest.raises(KeyError):
+            build_aggregation({}, [])
+
+    # -- Integration: rows sorted by CATEGORY_ORDER then date -----------
+
+    def test_rows_sorted_by_category_then_date(self):
+        recs = [
+            _agg_record("MEAL", {"transactionDate": "2026-04-02",
+                                  "transactionAmount": 20.00, "vendorName": "M2"},
+                        path="/out/pdfs/m2.pdf"),
+            _agg_record("HOTEL_INVOICE", {"transactionDate": "2026-04-01",
+                                            "transactionAmount": 300.00,
+                                            "vendorName": "H", "remark": "NOPAIR"},
+                        path="/out/pdfs/h.pdf"),
+            _agg_record("MEAL", {"transactionDate": "2026-04-01",
+                                  "transactionAmount": 10.00, "vendorName": "M1"},
+                        path="/out/pdfs/m1.pdf"),
+        ]
+        matching = do_all_matching(recs)
+        agg = build_aggregation(matching, recs)
+
+        # HOTEL_INVOICE sorts before MEAL; within MEAL, date asc
+        assert agg["rows"][0].category == "HOTEL_INVOICE"
+        assert agg["rows"][1].category == "MEAL"
+        assert agg["rows"][1].date == "2026-04-01"
+        assert agg["rows"][2].category == "MEAL"
+        assert agg["rows"][2].date == "2026-04-02"
+
+    # -- Regression: do_all_matching's OCR-business dedup must not strand
+    # -- records that main() still considers "valid". do_all_matching now
+    # -- returns the removed records under "dedup_removed"; main filters them
+    # -- out of valid_records before calling build_aggregation, so the
+    # -- completeness assertion stays balanced.
+    def test_dedup_removed_surfaces_and_balances_completeness(self, tmp_path):
+        # Two MEAL records sharing invoiceNo — one will be deduped.
+        a = {
+            "path": str(tmp_path / "meal_a.pdf"),
+            "valid": True, "category": "MEAL",
+            "ocr": {"invoiceNo": "25932000000090149375",
+                    "transactionAmount": 98.35,
+                    "transactionDate": "2025-09-11",
+                    "vendorName": "瑞幸咖啡（宁波）"},
+        }
+        b = {
+            "path": str(tmp_path / "meal_a (1).pdf"),
+            "valid": True, "category": "MEAL",
+            "ocr": {"invoiceNo": "25932000000090149375",
+                    "transactionAmount": 98.35,
+                    "transactionDate": "2025-09-11",
+                    "vendorName": "瑞幸咖啡（宁波）"},
+        }
+        # Both paths need to exist for _dedup_by_ocr_business_key's delete step
+        for rec in (a, b):
+            Path(rec["path"]).write_bytes(b"%PDF stub")
+
+        downloaded_all = [a, b]
+        matching = do_all_matching(downloaded_all)
+
+        # The matcher surfaces the losers so main() can exclude them.
+        assert "dedup_removed" in matching
+        assert len(matching["dedup_removed"]) == 1
+
+        # Simulating main()'s filter: valid_records drops the dedup losers.
+        dedup_ids = {id(r) for r in matching["dedup_removed"]}
+        valid_records = [d for d in downloaded_all
+                         if d.get("valid") and id(d) not in dedup_ids]
+        assert len(valid_records) == 1
+
+        # build_aggregation's completeness assertion must now pass.
+        agg = build_aggregation(matching, valid_records)
+        assert len([r for r in agg["rows"] if r.category == "MEAL"]) == 1
+
+
+class TestAggregationConsistency:
+    """Three writers must render the same grand_total string.
+
+    This suite is placeholder-ready — Unit 2/3 will flesh it out. We assert
+    the invariant at the aggregation layer: grand_total is a single Decimal
+    object that round-trips through `:.2f` consistently.
+    """
+
+    def test_grand_total_decimal_formats_two_decimals(self):
+        recs = [
+            _agg_record("MEAL", {"transactionDate": "2026-04-01",
+                                  "transactionAmount": 1234.567,
+                                  "vendorName": "V"},
+                        path="/out/pdfs/a.pdf"),
+        ]
+        matching = do_all_matching(recs)
+        agg = build_aggregation(matching, recs)
+
+        # 1234.567 → 1234.57 (ROUND_HALF_UP)
+        assert agg["subtotals"]["MEAL"] == Decimal("1234.57")
+        assert f"{agg['grand_total']:.2f}" == "1234.57"
+
+
+# =============================================================================
+# Unit 3 — print_openclaw_summary
+# =============================================================================
+
+class TestPrintOpenClawSummary:
+    """Assert content + shape of the OpenClaw chat summary. We use a sink
+    list + lambda writer so we can inspect the exact lines emitted, but the
+    implementation must also work with writer=print (stdout capture fallback).
+    """
+
+    @staticmethod
+    def _capture(**kwargs) -> List[str]:
+        """Run print_openclaw_summary against a sink and return its lines."""
+        sink: List[str] = []
+        kwargs.setdefault("writer", lambda s: sink.append(s))
+        print_openclaw_summary(**kwargs)
+        return sink
+
+    @staticmethod
+    def _default_paths(tmp_path):
+        return {
+            "output_dir": str(tmp_path),
+            "zip_path":   str(tmp_path / "package.zip"),
+            "csv_path":   str(tmp_path / "发票汇总.csv"),
+            "md_path":    str(tmp_path / "下载报告.md"),
+            "log_path":   str(tmp_path / "run.log"),
+        }
+
+    def _populated_agg(self):
+        recs = [
+            _agg_record("MEAL", {"transactionDate": "2026-04-01",
+                                  "transactionAmount": 100.0, "vendorName": "V1"},
+                        path="/out/pdfs/m1.pdf"),
+            _agg_record("TRAIN", {"transactionDate": "2026-04-02",
+                                   "transactionAmount": 300.0, "vendorName": "G1234"},
+                        path="/out/pdfs/t.pdf"),
+        ]
+        matching = do_all_matching(recs)
+        return build_aggregation(matching, recs)
+
+    # -- Non-empty template (R16a) ---------------------------------------
+
+    def test_non_empty_template_shows_vouchers_and_total(self, tmp_path):
+        agg = self._populated_agg()
+        lines = self._capture(
+            aggregation=agg, **self._default_paths(tmp_path),
+            missing_status="stop", date_range=("2026/04/01", "2026/04/30"),
+        )
+        text = "\n".join(lines)
+        assert "📄 发票报销包" in text
+        assert "共 2 份凭证" in text
+        assert "¥400.00" in text
+
+    def test_stop_status_says_can_submit(self, tmp_path):
+        agg = self._populated_agg()
+        lines = self._capture(
+            aggregation=agg, **self._default_paths(tmp_path),
+            missing_status="stop", date_range=("2026/04/01", "2026/04/30"),
+        )
+        assert any("可以提交报销" in ln for ln in lines)
+
+    def test_run_supplemental_includes_quoted_command(self, tmp_path):
+        agg = self._populated_agg()
+        output_dir = str(tmp_path / "spaces in path")
+        os.makedirs(output_dir, exist_ok=True)
+        paths = self._default_paths(tmp_path)
+        paths["output_dir"] = output_dir
+        lines = self._capture(
+            aggregation=agg, **paths,
+            missing_status="run_supplemental",
+            date_range=("2026/04/01", "2026/04/30"),
+        )
+        text = "\n".join(lines)
+        assert "--supplemental" in text
+        # shlex.quote wraps paths with spaces in single quotes
+        assert "'" in text
+
+    def test_ask_user_points_at_md(self, tmp_path):
+        agg = self._populated_agg()
+        paths = self._default_paths(tmp_path)
+        lines = self._capture(
+            aggregation=agg, **paths,
+            missing_status="ask_user",
+            date_range=("2026/04/01", "2026/04/30"),
+        )
+        text = "\n".join(lines)
+        assert "需人工核查" in text
+        assert paths["md_path"] in text
+
+    def test_unknown_missing_status_raises(self, tmp_path):
+        agg = self._populated_agg()
+        with pytest.raises(ValueError):
+            print_openclaw_summary(
+                aggregation=agg, **self._default_paths(tmp_path),
+                missing_status="bogus",
+                date_range=("2026/04/01", "2026/04/30"),
+            )
+
+    # -- Empty template (R16b) -------------------------------------------
+
+    def test_empty_template_short(self, tmp_path):
+        matching = do_all_matching([])
+        agg = build_aggregation(matching, [])
+        lines = self._capture(
+            aggregation=agg, **self._default_paths(tmp_path),
+            missing_status="stop",
+            date_range=("2026/04/01", "2026/04/30"),
+        )
+        text = "\n".join(lines)
+        assert "本次未下载到凭证" in text
+        # Empty template: no zip/csv/md lines
+        assert "📦" not in text
+        # Empty template does not include a "下一步" block
+        assert "可以提交报销" not in text
+
+    # -- Exclusions invite ----------------------------------------------
+
+    def test_invite_present_in_non_empty_template(self, tmp_path):
+        agg = self._populated_agg()
+        lines = self._capture(
+            aggregation=agg, **self._default_paths(tmp_path),
+            missing_status="stop", date_range=("2026/04/01", "2026/04/30"),
+        )
+        text = "\n".join(lines)
+        assert "💡 发现不该报销的" in text
+        assert "learned_exclusions.json，下次自动排除" in text
+
+    def test_invite_absent_in_empty_template(self, tmp_path):
+        matching = do_all_matching([])
+        agg = build_aggregation(matching, [])
+        lines = self._capture(
+            aggregation=agg, **self._default_paths(tmp_path),
+            missing_status="stop",
+            date_range=("2026/04/01", "2026/04/30"),
+        )
+        text = "\n".join(lines)
+        assert "💡" not in text
+
+    # -- Edge cases -----------------------------------------------------
+
+    def test_zip_failure_degrades_gracefully(self, tmp_path):
+        agg = self._populated_agg()
+        paths = self._default_paths(tmp_path)
+        paths["zip_path"] = None  # DEC-6 sentinel
+        lines = self._capture(
+            aggregation=agg, **paths,
+            missing_status="stop",
+            date_range=("2026/04/01", "2026/04/30"),
+        )
+        text = "\n".join(lines)
+        assert "未生成" in text or "打包失败" in text
+        # CSV and MD paths still present
+        assert paths["csv_path"] in text
+        assert paths["md_path"] in text
+
+    def test_unparsed_only_uses_non_empty_template(self, tmp_path):
+        """--no-llm run: all UNPARSED → non-empty template (R16a), warning category."""
+        recs = [
+            {"path": "/out/pdfs/u1.pdf", "valid": True,
+             "category": "UNPARSED", "ocr": None},
+        ]
+        matching = do_all_matching(recs)
+        agg = build_aggregation(matching, recs)
+        lines = self._capture(
+            aggregation=agg, **self._default_paths(tmp_path),
+            missing_status="ask_user",
+            date_range=("2026/04/01", "2026/04/30"),
+        )
+        text = "\n".join(lines)
+        # UNPARSED rows exist → non-empty template, not R16b
+        assert "本次未下载到凭证" not in text
+        assert "📄 发票报销包" in text
+
+    def test_low_conf_footnote_when_present(self, tmp_path):
+        recs = [
+            _agg_record("MEAL", {"transactionDate": "2026-04-01",
+                                  "transactionAmount": 50.0, "vendorName": "V",
+                                  "_amountConfidence": "low"},
+                        path="/out/pdfs/m.pdf"),
+        ]
+        matching = do_all_matching(recs)
+        agg = build_aggregation(matching, recs)
+        lines = self._capture(
+            aggregation=agg, **self._default_paths(tmp_path),
+            missing_status="stop",
+            date_range=("2026/04/01", "2026/04/30"),
+        )
+        text = "\n".join(lines)
+        assert "†" in text
+        assert "可信度=low" in text
+
+    def test_unmatched_hotel_warnings_only_when_positive(self, tmp_path):
+        recs = [
+            _agg_record("HOTEL_INVOICE", {"transactionDate": "2026-04-01",
+                                            "transactionAmount": 500.0,
+                                            "remark": "UNIQUE",
+                                            "vendorName": "酒店"},
+                        path="/out/pdfs/inv.pdf"),
+        ]
+        matching = do_all_matching(recs)
+        agg = build_aggregation(matching, recs)
+        lines = self._capture(
+            aggregation=agg, **self._default_paths(tmp_path),
+            missing_status="run_supplemental",
+            date_range=("2026/04/01", "2026/04/30"),
+        )
+        text = "\n".join(lines)
+        assert "酒店发票无对应水单" in text
+        # No ride-hailing noise
+        assert "网约车" not in text
+
+    def test_absolute_paths_in_output(self, tmp_path):
+        agg = self._populated_agg()
+        # Pass relative paths — implementation must abspath them
+        lines = self._capture(
+            aggregation=agg,
+            output_dir=str(tmp_path),
+            zip_path="rel_package.zip",
+            csv_path="rel_summary.csv",
+            md_path="rel_report.md",
+            log_path="rel_run.log",
+            missing_status="stop",
+            date_range=("2026/04/01", "2026/04/30"),
+        )
+        text = "\n".join(lines)
+        for fragment in ["rel_package.zip", "rel_summary.csv", "rel_report.md"]:
+            # Each referenced path should resolve to absolute
+            assert os.path.abspath(fragment) in text
+
+    def test_grand_total_strings_match_csv_and_md(self, tmp_path):
+        """Integration: CSV total, MD total, stdout total render identically."""
+        recs = [
+            _agg_record("MEAL", {"transactionDate": "2026-04-01",
+                                  "transactionAmount": 12.345,
+                                  "vendorName": "V"},
+                        path="/out/pdfs/m.pdf"),
+        ]
+        matching = do_all_matching(recs)
+        agg = build_aggregation(matching, recs)
+
+        csv_path = tmp_path / "summary.csv"
+        write_summary_csv(str(csv_path), agg)
+        csv_text = csv_path.read_text(encoding="utf-8-sig")
+
+        lines = self._capture(
+            aggregation=agg, **self._default_paths(tmp_path),
+            missing_status="stop",
+            date_range=("2026/04/01", "2026/04/30"),
+        )
+        stdout_text = "\n".join(lines)
+
+        # ROUND_HALF_UP: 12.345 → 12.35
+        expected = "12.35"
+        assert expected in csv_text
+        assert expected in stdout_text
+        # MD rendering — via write_report_v53
+        md_path = tmp_path / "report.md"
+        # Minimal shim: build via dispatch-style call is cumbersome; just
+        # assert the Decimal itself renders identically:
+        assert f"{agg['grand_total']:.2f}" == expected

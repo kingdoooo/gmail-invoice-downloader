@@ -23,6 +23,7 @@ def get_ocr_prompt() -> str:
 | vendorTaxId | string | 销售方统一社会信用代码（18位） |
 | serviceType | string | 服务类型，如 "*餐饮服务*餐饮费", "*运输服务*客运服务费", "*住宿服务*房费", "*电信服务*通信服务费", "*旅游服务*代订车服务费" |
 | docType | string | 文档类型，如 "电子发票（普通发票）", "电子发票（增值税专用发票）", "Guest Folio", "INFORMATION INVOICE", "INFORMATION BILL", "行程单", "行程报销单", "出租汽车发票" |
+| invoiceNo | string | 发票号码（中国电子发票右上角"发票号码"后的 20 位数字，例："25327000001619791763"）。不是 invoiceCode。水单/行程单等非税务发票无此字段时返回 null |
 | isChineseInvoice | boolean | 是否为中国增值税发票, 有发票印章（税务局）, 发票号码, 销售方/购买方信息, 统一社会信用代码 |
 
 ## ⚠️ 重要规则：购买方/销售方区分

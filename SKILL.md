@@ -52,7 +52,7 @@ python3 scripts/download-invoices.py \
 
 ```bash
 export AWS_REGION=us-east-1                                # 可选，默认 us-east-1
-export BEDROCK_MODEL_ID=global.anthropic.claude-sonnet-4-5 # 可选
+export BEDROCK_MODEL_ID=global.anthropic.claude-opus-4-7 # 可选
 ```
 
 boto3 凭证解析链：环境变量 → `AWS_BEARER_TOKEN_BEDROCK` → `~/.aws/credentials` → IAM Role / Instance Profile → ECS Task Role。
@@ -62,7 +62,7 @@ boto3 凭证解析链：环境变量 → `AWS_BEARER_TOKEN_BEDROCK` → `~/.aws/
 ```bash
 export LLM_PROVIDER=anthropic
 export ANTHROPIC_API_KEY='<your-key>'
-export ANTHROPIC_MODEL=claude-sonnet-4-5   # 可选
+export ANTHROPIC_MODEL=claude-sonnet-4-6   # 可选
 ```
 
 #### 3. `anthropic-compatible` — Anthropic SDK + 兼容端点

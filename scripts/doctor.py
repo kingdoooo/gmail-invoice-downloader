@@ -74,7 +74,7 @@ def _check_llm_config() -> tuple[bool, str]:
         region = os.environ.get("AWS_REGION", "us-east-1")
         # boto3 1.35.17+ reads AWS_BEARER_TOKEN_BEDROCK (Bedrock API Key).
         if os.environ.get("AWS_BEARER_TOKEN_BEDROCK"):
-            model = os.environ.get("BEDROCK_MODEL_ID", "claude-sonnet-4-5 (default)")
+            model = os.environ.get("BEDROCK_MODEL_ID", "claude-opus-4-7 (default)")
             return True, f"Bedrock via API key (region={region}, model={model})"
         try:
             import boto3
@@ -96,7 +96,7 @@ def _check_llm_config() -> tuple[bool, str]:
                 "export AWS_BEARER_TOKEN_BEDROCK=..., or pass --no-llm."
             )
         method = getattr(creds, "method", "unknown")
-        model = os.environ.get("BEDROCK_MODEL_ID", "claude-sonnet-4-5 (default)")
+        model = os.environ.get("BEDROCK_MODEL_ID", "claude-opus-4-7 (default)")
         return True, f"Bedrock via {method} (region={region}, model={model})"
 
     if provider == "anthropic":
@@ -105,7 +105,7 @@ def _check_llm_config() -> tuple[bool, str]:
                 "LLM_PROVIDER=anthropic but ANTHROPIC_API_KEY not set. "
                 "REMEDIATION: export ANTHROPIC_API_KEY=..., switch provider, or --no-llm."
             )
-        model = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-5 (default)")
+        model = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6 (default)")
         return True, f"Anthropic API key present (model={model})"
 
     if provider == "anthropic-compatible":
@@ -121,7 +121,7 @@ def _check_llm_config() -> tuple[bool, str]:
                 "LLM_PROVIDER=anthropic-compatible but ANTHROPIC_API_KEY not set. "
                 "REMEDIATION: export ANTHROPIC_API_KEY=... (endpoint-specific key)."
             )
-        model = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-5 (default)")
+        model = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6 (default)")
         return True, f"Anthropic-compatible endpoint {base} (model={model})"
 
     if provider == "openai":
