@@ -384,7 +384,7 @@ _DEDUP_KEYED_CATEGORIES = frozenset({
     "HOTEL_INVOICE", "MEAL", "MOBILE", "TOLLS",
     "RIDEHAILING_INVOICE", "TAXI", "TRAIN",
 })
-_NO_DEDUP_CATEGORIES = frozenset({"RIDEHAILING_RECEIPT", "UNKNOWN", "UNPARSED"})
+_NO_DEDUP_CATEGORIES = frozenset({"UNKNOWN", "UNPARSED"})
 
 
 def _normalize_hotel_name(name: Optional[str]) -> str:

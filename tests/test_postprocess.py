@@ -1057,15 +1057,44 @@ class TestOCRContentDedup:
         assert len(kept) == 2
         assert removed == []
 
-    def test_unknown_and_receipt_not_deduped(self, tmp_path):
-        """RIDEHAILING_RECEIPT and UNKNOWN categories are explicitly excluded."""
+    def test_unknown_category_not_deduped(self, tmp_path):
+        """UNKNOWN/UNPARSED stay in the skip-list — we don't trust their contents
+        enough to collapse byte-identical pairs."""
         a = self._mkrec_with_file(
-            tmp_path, "r1.pdf", "RIDEHAILING_RECEIPT",
-            {"totalAmount": 100.0}, content=b"PDF A")
+            tmp_path, "u1.pdf", "UNKNOWN", {}, content=b"PDF A")
         b = self._mkrec_with_file(
-            tmp_path, "r2.pdf", "RIDEHAILING_RECEIPT",
-            {"totalAmount": 100.0}, content=b"PDF A")  # same bytes
-        # SHA pass would catch these if participating, but category excluded → skip
+            tmp_path, "u2.pdf", "UNKNOWN", {}, content=b"PDF A")  # same bytes
+        kept, removed = _dedup_by_ocr_business_key([a, b])
+        assert len(kept) == 2
+        assert removed == []
+
+    def test_ridehailing_receipt_sha256_collapses_byte_identical(self, tmp_path):
+        """Regression: --supplemental used to re-download the same Didi
+        行程单 attachments and, because RIDEHAILING_RECEIPT was excluded from
+        dedup, those byte-identical duplicates survived all the way into the
+        matcher as 'orphan' receipts. SHA256 pass 2 must catch them now."""
+        shared = b"%PDF-1.4 didi-trip-receipt"
+        a = self._mkrec_with_file(
+            tmp_path, "20250810_滴滴出行_行程单.pdf", "RIDEHAILING_RECEIPT",
+            {"totalAmount": 1755.90}, content=shared)
+        b = self._mkrec_with_file(
+            tmp_path, "20250810_滴滴出行_行程单 (4).pdf", "RIDEHAILING_RECEIPT",
+            {"totalAmount": 1755.90}, content=shared)
+        kept, removed = _dedup_by_ocr_business_key([a, b])
+        assert len(kept) == 1
+        assert len(removed) == 1
+        # Shorter basename (the non-suffixed copy) wins
+        assert kept[0]["path"].endswith("行程单.pdf")
+
+    def test_ridehailing_receipt_different_bytes_not_collapsed(self, tmp_path):
+        """Two genuine Didi trips same amount but different PDFs (different
+        trip metadata) must not collapse — same-amount is not enough."""
+        a = self._mkrec_with_file(
+            tmp_path, "20250810_trip_a.pdf", "RIDEHAILING_RECEIPT",
+            {"totalAmount": 100.0}, content=b"%PDF trip A")
+        b = self._mkrec_with_file(
+            tmp_path, "20250810_trip_b.pdf", "RIDEHAILING_RECEIPT",
+            {"totalAmount": 100.0}, content=b"%PDF trip B")
         kept, removed = _dedup_by_ocr_business_key([a, b])
         assert len(kept) == 2
         assert removed == []
