@@ -38,7 +38,6 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from core.classify import classify_invoice
 from core.llm_client import (
-    LLMAuthError,
     LLMDisabledError,
     LLMError,
     get_client,
@@ -163,13 +162,13 @@ def analyze_pdf_batch(
     Returns:
         {record_path: {ocr, category, city, error, used_fallback}}
     """
-    # Construct client once (singleton will cache). If disabled, skip upfront.
+    # Construct client once (singleton will cache). Let auth / config errors
+    # propagate so the caller can map them to EXIT_LLM_CONFIG with a clear
+    # REMEDIATION line. Silent degradation to UNPARSED on auth failure was
+    # worse than surfacing the real problem (user misreads 60 UNPARSED rows
+    # as a data-quality issue rather than a missing env var).
     if use_llm:
-        try:
-            get_client()  # surface auth errors early
-        except (LLMAuthError, LLMError) as e:
-            _log(logger, f"  ⚠️  LLM client init failed: {e}. Proceeding in offline mode.")
-            use_llm = False
+        get_client()  # raises LLMAuthError / LLMConfigError on misconfig
 
     results: Dict[str, Dict[str, Any]] = {}
     to_analyze = [r for r in records if r.get("valid") and r.get("path")]

@@ -348,20 +348,80 @@ class DisabledClient(LLMClient):
 # Error classification
 # =============================================================================
 
-def _reraise_as_llm_error(e: Exception) -> NoReturn:
-    """Map provider SDK exceptions to our LLM* hierarchy."""
-    msg = str(e).lower()
+def _classify_by_type(e: Exception) -> Optional[type]:
+    """Inspect the exception type hierarchy first (most reliable across SDK
+    versions). Returns the LLM* class to raise, or None to fall through to
+    substring matching.
+    """
+    cls_name = type(e).__name__
+    # boto3 / botocore: error code lives in .response['Error']['Code']
+    response = getattr(e, "response", None)
+    if isinstance(response, dict):
+        code = response.get("Error", {}).get("Code", "")
+        if code in ("ThrottlingException", "TooManyRequestsException",
+                    "ServiceUnavailableException"):
+            return LLMRateLimitError
+        if code in ("ValidationException", "ModelStreamErrorException"):
+            # ValidationException often means the PDF was rejected — could be
+            # size or content. Caller retries won't help.
+            return LLMError
+        if code in ("AccessDeniedException", "UnrecognizedClientException",
+                    "InvalidSignatureException", "ExpiredTokenException"):
+            return LLMAuthError
+        if code == "ModelTimeoutException":
+            return LLMServerError
+    # Anthropic / OpenAI — their SDKs expose typed exceptions with these names.
+    # We check by name rather than importing the SDKs to avoid hard deps.
+    if cls_name in ("RateLimitError", "APIStatusError"):
+        status = getattr(e, "status_code", None)
+        if status == 429:
+            return LLMRateLimitError
+        if status in (500, 502, 503, 504, 529):
+            return LLMServerError
+        if status in (401, 403):
+            return LLMAuthError
+        if status == 413:
+            return LLMSizeLimitError
+    if cls_name in ("AuthenticationError", "PermissionDeniedError"):
+        return LLMAuthError
+    if cls_name == "APIConnectionError" or cls_name == "APITimeoutError":
+        return LLMServerError
+    return None
 
+
+def _reraise_as_llm_error(e: Exception) -> NoReturn:
+    """Map provider SDK exceptions to our LLM* hierarchy.
+
+    Strategy:
+      1. Type-based classification via _classify_by_type (preferred — robust
+         across SDK versions because it checks exception class names and
+         boto3 error codes).
+      2. Substring fallback on str(e).lower() (last-resort — catches the long
+         tail of wrapped / generic exceptions whose type doesn't match).
+    """
+    target = _classify_by_type(e)
+    if target is LLMRateLimitError:
+        raise LLMRateLimitError(f"Rate limited: {e}") from e
+    if target is LLMServerError:
+        raise LLMServerError(f"Server error: {e}") from e
+    if target is LLMAuthError:
+        raise LLMAuthError(f"Auth failed: {e}") from e
+    if target is LLMSizeLimitError:
+        raise LLMSizeLimitError(f"PDF exceeds model limit: {e}") from e
+    if target is LLMError:
+        raise LLMError(f"LLM call failed (provider-validation): {e}") from e
+
+    # Fallback: substring match on stringified exception
+    msg = str(e).lower()
     if any(h in msg for h in ("too large", "exceeds", "size limit")):
         raise LLMSizeLimitError(f"PDF exceeds model limit: {e}") from e
     if any(h in msg for h in ("401", "unauthorized", "forbidden", "credential")):
         raise LLMAuthError(f"Auth failed: {e}") from e
-    if any(h in msg for h in ("429", "rate_limit", "rate limit", "throttl", "overloaded", "529")):
+    if any(h in msg for h in ("429", "rate_limit", "rate limit", "throttl",
+                              "overloaded", "529")):
         raise LLMRateLimitError(f"Rate limited: {e}") from e
     if any(h in msg for h in ("500", "502", "503", "504", "server error", "timeout")):
         raise LLMServerError(f"Server error: {e}") from e
-
-    # Default: treat as plain LLMError so callers can decide
     raise LLMError(f"LLM call failed: {e}") from e
 
 

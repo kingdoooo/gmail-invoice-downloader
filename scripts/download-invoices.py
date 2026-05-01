@@ -54,21 +54,16 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
 from invoice_helpers import (  # noqa: E402
     classify_email,
-    classify_invoice_category,
     validate_pdf_header,
     make_unique_path,
     generate_filename,
     extract_date_from_email,
     extract_pdfs_from_zip,
-    get_body_text,
-    extract_seller_from_pdf,
-    extract_hotel_from_folio_pdf,
     resolve_baiwang_short_url,
     resolve_baiwang_bwfp_short_url,
     resolve_nuonuo_short_url,
     resolve_bwjf_short_url,
     resolve_keruyun_short_url,
-    DOC_TYPE_LABELS,
 )
 
 # v5.3 additions
@@ -92,6 +87,12 @@ EXIT_AUTH = 2
 EXIT_LLM_CONFIG = 3
 EXIT_GMAIL_QUOTA = 4
 EXIT_PARTIAL = 5
+
+
+class GmailQuotaError(Exception):
+    """Raised by GmailClient when Gmail API returns a rate/quota error (429 / 403
+    userRateLimitExceeded). Distinguishes quota exhaustion from auth failure so
+    the CLI can exit with EXIT_GMAIL_QUOTA and the Agent can wait-and-retry."""
 
 CST = datetime.timezone(datetime.timedelta(hours=8))
 SKILL_DIR = os.path.dirname(SCRIPT_DIR)
@@ -141,6 +142,26 @@ class GmailClient:
                 if e.code == 401:
                     self._refresh()
                     continue
+                # 429 = rate limit; 403 with Gmail's 'userRateLimitExceeded' /
+                # 'quotaExceeded' reason body is a quota error, not an auth
+                # failure. Surface as GmailQuotaError so main() can map to
+                # EXIT_GMAIL_QUOTA and let the Agent wait-and-retry.
+                if e.code == 429:
+                    retry_after = e.headers.get("Retry-After") if e.headers else None
+                    raise GmailQuotaError(
+                        f"Gmail rate limit (429); Retry-After={retry_after}"
+                    ) from e
+                if e.code == 403:
+                    body = b""
+                    try:
+                        body = e.read()
+                    except Exception:
+                        pass
+                    body_text = body.decode("utf-8", errors="ignore").lower()
+                    if "quota" in body_text or "ratelimit" in body_text:
+                        raise GmailQuotaError(
+                            f"Gmail 403 quota/rate-limit: {body_text[:200]}"
+                        ) from e
                 raise
         raise RuntimeError("failed after token refresh")
 
@@ -296,23 +317,10 @@ def download_attachment(client, entry, pdfs_dir, log):
         with open(out, "wb") as f:
             f.write(data)
         ok, info = validate_pdf_header(out)
-        # If merchant is '未知商户', try to extract from PDF content
-        if ok and merchant == "未知商户":
-            real_name = None
-            if actual_type == "TAX_INVOICE":
-                real_name = extract_seller_from_pdf(out)
-            elif actual_type == "HOTEL_FOLIO":
-                real_name = extract_hotel_from_folio_pdf(out)
-            if real_name and real_name != "未知商户":
-                new_fname = generate_filename(date_str, real_name, actual_type)
-                if len(atts) > 1 or has_mixed:
-                    base, ext = os.path.splitext(new_fname)
-                    suffix = fname[fname.rfind("_发票")+len("_发票"):fname.rfind(".pdf")] if "_发票" in fname else ""
-                    new_fname = f"{base}{suffix}{ext}"
-                new_out = make_unique_path(pdfs_dir, new_fname)
-                os.rename(out, new_out)
-                out = new_out
-                merchant = real_name
+        # v5.3: rename_by_ocr (Step 7) overwrites the filename with the
+        # LLM-derived vendor, so the v5.2 pdftotext pre-extraction of merchant
+        # here was dead work. Removed. In --no-llm mode, files keep the
+        # email-derived merchant name as a best-effort fallback.
         print(f"  {'✅' if ok else '⚠️'} {os.path.basename(out)} ({len(data)//1024}KB)", file=log)
         rec = {
             "path": out, "valid": ok, "info": info,
@@ -422,15 +430,8 @@ def download_link(entry, pdfs_dir, log):
                     os.remove(out)
                     print(f"  ♻️  duplicate of {existing}, removed {os.path.basename(out)}", file=log)
                     return [], []
-    # If merchant is '未知商户' and this is a tax invoice, try to extract seller from PDF
-    if ok and merchant == "未知商户" and entry["doc_type"] == "TAX_INVOICE":
-        real_seller = extract_seller_from_pdf(out)
-        if real_seller and real_seller != "未知商户":
-            new_fname = generate_filename(date_str, real_seller, entry["doc_type"])
-            new_out = make_unique_path(pdfs_dir, new_fname)
-            os.rename(out, new_out)
-            out = new_out
-            merchant = real_seller
+    # v5.3: rename_by_ocr (Step 7) owns final naming. v5.2's pdftotext pre-extraction
+    # removed — see download_attachment comment.
     print(f"  {'✅' if ok else '⚠️'} {os.path.basename(out)} ({entry['method']})", file=log)
     url_key = hashlib.sha1(url.encode("utf-8")).hexdigest()[:12] if isinstance(url, str) else "link"
     rec = {
@@ -445,132 +446,9 @@ def download_link(entry, pdfs_dir, log):
     return ([rec], []) if ok else ([], [{**rec, "reason": info}])
 
 
-# ─── Pairing (v5.2 — strictly by same date) ───────────────────────────────
-
-def pair_folios_with_invoices(downloaded):
-    """Pair each folio with same-day *LODGING* invoices. Dining is never paired."""
-    folios_by_date = defaultdict(list)
-    lodging_by_date = defaultdict(list)
-    all_dining = []
-    all_other = []
-    for d in downloaded:
-        if not d.get("valid"):
-            continue
-        if d["doc_type"] == "HOTEL_FOLIO":
-            folios_by_date[d["date"]].append(d)
-        elif d["doc_type"] == "TAX_INVOICE":
-            cat = classify_invoice_category(d["path"])
-            d["category"] = cat
-            if cat == "LODGING":
-                lodging_by_date[d["date"]].append(d)
-            elif cat == "DINING":
-                all_dining.append(d)
-            else:
-                all_other.append(d)
-
-    pairings = []
-    matched = set()
-    for date_str in sorted(folios_by_date.keys()):
-        for folio in folios_by_date[date_str]:
-            lodging = lodging_by_date.get(date_str, [])
-            for inv in lodging:
-                matched.add(inv["path"])
-            pairings.append({"folio": folio, "lodging": lodging})
-
-    unmatched_lodging = [
-        inv for invs in lodging_by_date.values() for inv in invs if inv["path"] not in matched
-    ]
-    return pairings, unmatched_lodging, all_dining, all_other
-
-
-# ─── Report generation ─────────────────────────────────────────────────────
-
-def write_report(path, downloaded, failed, skipped, pairings, unmatched_lodging, all_dining, all_other, date_range):
-    now = datetime.datetime.now(CST)
-    valid_downloads = [d for d in downloaded if d.get("valid")]
-    folios = [d for d in valid_downloads if d["doc_type"] == "HOTEL_FOLIO"]
-    lodging = [d for d in valid_downloads if d["doc_type"] == "TAX_INVOICE" and d.get("category") == "LODGING"]
-    other_docs = [d for d in valid_downloads if d["doc_type"] not in ("HOTEL_FOLIO", "TAX_INVOICE")]
-
-    lines = []
-    lines.append(f"# Gmail 发票下载报告\n")
-    lines.append(f"**日期范围**：{date_range[0]} → {date_range[1]}  ")
-    lines.append(f"**生成时间**：{now.strftime('%Y-%m-%d %H:%M')} CST  ")
-    lines.append(f"**文件数**：{len(valid_downloads)} 份 PDF  ")
-    lines.append(f"**配对规则**：水单 ↔ 住宿发票严格同日。餐饮不自动关联（开票日 ≠ 就餐日）。\n")
-
-    lines.append("## 📊 摘要\n")
-    lines.append("| | |\n|---|---|")
-    lines.append(f"| 酒店水单 | {len(folios)} |")
-    lines.append(f"| 住宿发票 | {len(lodging)} |")
-    lines.append(f"| 餐饮发票 | {len(all_dining)} |")
-    lines.append(f"| 其他发票 | {len(all_other)} |")
-    lines.append(f"| 其他单据 | {len(other_docs)} |")
-    lines.append(f"| 下载失败 | {len(failed)} |")
-    lines.append(f"| 跳过 (MANUAL/IGNORE) | {len(skipped)} |\n")
-
-    lines.append("## 🏨 酒店入住配对\n")
-    lines.append("| 退房日 | 水单开票方 | 水单 | 住宿发票 | 状态 |\n|--------|-------------|:----:|:--------:|:----:|")
-    for p in sorted(pairings, key=lambda x: x["folio"]["date"]):
-        f = p["folio"]
-        fd = f["date"]
-        st = "✅" if p["lodging"] else "⚠️ 同日无住宿发票"
-        lines.append(f"| {fd[:4]}-{fd[4:6]}-{fd[6:]} | {f['merchant']} | 1 | {len(p['lodging'])} | {st} |")
-    lines.append("\n### 配对详情\n")
-    for p in sorted(pairings, key=lambda x: x["folio"]["date"]):
-        f = p["folio"]
-        fd = f["date"]
-        lines.append(f"\n**{fd[:4]}-{fd[4:6]}-{fd[6:]}  （{f['merchant']}）**\n")
-        lines.append(f"- 📋 水单 `{os.path.basename(f['path'])}`")
-        for inv in p["lodging"]:
-            lines.append(f"- 🏨 住宿发票 `{os.path.basename(inv['path'])}` _(销售方: {inv['merchant']})_")
-        if not p["lodging"]:
-            lines.append("- ⚠️ 同日无住宿发票")
-
-    if unmatched_lodging:
-        lines.append(f"\n## ⚠️ 未匹配的住宿发票（{len(unmatched_lodging)} 张）\n")
-        lines.append("同日无水单，可能是水单未到邮箱。\n")
-        for inv in sorted(unmatched_lodging, key=lambda x: x["date"]):
-            d = inv['date']
-            lines.append(f"- [{d[:4]}-{d[4:6]}-{d[6:]}] **{inv['merchant']}** `{os.path.basename(inv['path'])}`")
-
-    if all_dining:
-        lines.append(f"\n## 🍽️ 餐饮发票（{len(all_dining)} 张，按商户聚合）\n")
-        lines.append("餐饮发票不自动关联酒店（开票日可能合并多天就餐）。\n")
-        by_m = defaultdict(list)
-        for inv in all_dining:
-            by_m[inv["merchant"]].append(inv)
-        for m, invs in sorted(by_m.items(), key=lambda x: -len(x[1])):
-            ds = sorted(set(i['date'] for i in invs))
-            lines.append(f"### {m} × {len(invs)}")
-            for inv in sorted(invs, key=lambda x: x["date"]):
-                d = inv['date']
-                lines.append(f"- [{d[:4]}-{d[4:6]}-{d[6:]}] `{os.path.basename(inv['path'])}`")
-
-    if all_other:
-        lines.append(f"\n## 📄 其他发票（{len(all_other)} 张）\n")
-        for inv in sorted(all_other, key=lambda x: x["date"]):
-            d = inv['date']
-            lines.append(f"- [{d[:4]}-{d[4:6]}-{d[6:]}] **{inv['merchant']}** `{os.path.basename(inv['path'])}`")
-
-    if other_docs:
-        lines.append(f"\n## 🚖 非发票单据（{len(other_docs)} 份）\n")
-        by_t = defaultdict(list)
-        for d in other_docs:
-            by_t[d["doc_type"]].append(d)
-        for t, items in sorted(by_t.items()):
-            lines.append(f"- **{DOC_TYPE_LABELS.get(t, t)}** × {len(items)}")
-
-    if failed:
-        lines.append(f"\n## ❌ 下载失败（{len(failed)} 项）\n")
-        for f in failed:
-            lines.append(f"- {f.get('subject', '?')[:70]}: {f.get('reason', '?')}")
-
-    with open(path, "w") as f:
-        f.write("\n".join(lines) + "\n")
-
-
 # ─── v5.3 report ───────────────────────────────────────────────────────────
+# (v5.2 pair_folios_with_invoices + write_report removed in v5.3 — replaced by
+#  do_all_matching in v53_pipeline and write_report_v53 below.)
 
 def write_report_v53(
     path, *,
@@ -910,10 +788,21 @@ def main():
     try:
         client = GmailClient(args.creds, args.token)
         msg_refs = client.search(query, max_results=args.max_results)
+    except GmailQuotaError as e:
+        say(f"❌ Gmail quota exhausted: {e}")
+        print(
+            f"\nREMEDIATION: wait 60s (or honor Retry-After header) then rerun. "
+            f"Consider --max-results=N to reduce load.",
+            file=sys.stderr,
+        )
+        log.close()
+        sys.exit(EXIT_GMAIL_QUOTA)
     except Exception as e:
         say(f"❌ Gmail search failed: {e}")
-        print(f"\nREMEDIATION: run `python3 scripts/gmail-auth.py` to refresh token.json.",
-              file=sys.stderr)
+        print(
+            f"\nREMEDIATION: run `python3 scripts/gmail-auth.py` to refresh token.json.",
+            file=sys.stderr,
+        )
         log.close()
         sys.exit(EXIT_AUTH)
     say(f"  {len(msg_refs)} messages matched in {time.time()-t0:.1f}s")
@@ -1100,4 +989,23 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # Wrap main() so any uncaught exception surfaces as EXIT_UNKNOWN with a
+    # REMEDIATION line pointing agents at run.log for the traceback. SystemExit
+    # from inside main() (explicit sys.exit(N)) passes through unchanged.
+    import traceback
+    try:
+        main()
+    except SystemExit:
+        raise
+    except KeyboardInterrupt:
+        print("\nREMEDIATION: interrupted by user; partial state may exist in output dir.",
+              file=sys.stderr)
+        sys.exit(130)
+    except Exception as _e:
+        traceback.print_exc(file=sys.stderr)
+        print(
+            f"\nREMEDIATION: unexpected error ({type(_e).__name__}); check run.log "
+            f"in the output dir for full traceback.",
+            file=sys.stderr,
+        )
+        sys.exit(EXIT_UNKNOWN)
