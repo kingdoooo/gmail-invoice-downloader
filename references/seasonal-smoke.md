@@ -61,8 +61,9 @@ not here.
 2. **Zip is produced.**  `~/tmp/smoke-<stamp>/../发票打包_*.zip` exists
    and is non-empty.
 3. **Report markdown is produced.**  `~/tmp/smoke-<stamp>/下载报告.md`
-   exists and contains a "搜到 N 封邮件" summary line (confirms pipeline
-   reached Step 9).
+   exists, starts with `# Gmail 发票下载报告 (v5.3)`, and contains a
+   `**有效 PDF**：N 份` line (confirms pipeline reached Step 9's
+   report writer).
 4. **missing.json parses and has the declared schema version.**
    ```bash
    python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["schema_version"]=="1.0", d; print("ok")' \
