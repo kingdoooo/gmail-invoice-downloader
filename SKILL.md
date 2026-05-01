@@ -1,13 +1,17 @@
 ---
 name: gmail-invoice-downloader
 display_name: Gmail 发票下载器
-description: "Search Gmail for invoices, receipts, hotel folios, and billing documents, then download them as PDFs. Use when: (1) downloading invoices/receipts for expense reimbursement, (2) batch-collecting billing documents from Gmail, (3) the user mentions 发票/invoice/水单/报销/收据. Handles direct PDF attachments, ZIP attachments (extract PDF, skip OFD), 9+ Chinese invoice platforms (百望云 3 templates, 诺诺网, fapiao.com, xforceplus, 云票, 百旺金穗云, 金财数科, 克如云), 12306 payment notification handling, and hotel folio↔invoice pairing by same-day rule. **Extensible to unknown platforms**: ships with `scripts/probe-platform.py` + a reverse engineering playbook in `references/platforms.md` — when a new invoice platform appears in MANUAL emails, run probe, follow the 5-step playbook to add support in <30 min."
+description: "Batch-download Chinese invoices, receipts, hotel folios, and billing documents from Gmail as PDFs, then use LLM OCR to extract vendor/date/amount and pair hotel folios↔invoices + ride-hailing receipts↔invoices. Outputs a ready-to-submit report (下载报告.md), Excel-compatible CSV (发票汇总.csv), and zip bundle. Use when: (1) downloading invoices/receipts for 报销 / expense reimbursement, (2) batch-collecting billing documents from Gmail, (3) the user mentions 发票, invoice, 水单, 报销, 收据, folio, or hotel e-folio. Extensible to new Chinese invoice platforms via `scripts/probe-platform.py` + reverse-engineering playbook in `references/platforms.md`."
 icon: "🧾"
 ---
+
+> **Skill target**: This Skill is invoked by **OpenClaw Agents**, not by end users directly. The non-standard frontmatter keys (`display_name`, `icon`) are OpenClaw runtime extensions — they are **not** part of the Anthropic Skill spec and do nothing in a plain Claude Code / Claude.ai context. The agent-facing contract — exit codes, `REMEDIATION:` stderr lines, `missing.json` schema v1.0 — is documented in § Exit Codes and § Loop Playbook below.
 
 # Gmail Invoice Downloader (v5.3)
 
 搜索 Gmail 中用户指定日期范围内的发票/收据/水单/行程单，用 LLM OCR 提取销售方/日期/金额，按 P1 remark / P2 日期+金额 / P3 同日兜底 三层规则配对酒店水单↔住宿发票、按金额 0.01 容差配对网约车发票↔行程单，输出 `下载报告.md` + `发票汇总.csv` + `发票打包_YYYYMMDD-HHMMSS.zip`。
+
+**已支持平台**（Step 3 决策树自动分类）：直接 PDF 附件 / ZIP 附件（取 PDF 丢 OFD）/ 9 种中国发票平台链接（百望云 3 种模板 + 诺诺网 + fapiao.com + xforceplus + 云票 + 百旺金穗云 + 金财数科 + 克如云）/ 12306 支付通知（过滤）/ 酒店 e-folio。详见 [`references/platforms.md`](references/platforms.md)。
 
 ## Quick Start
 
@@ -141,7 +145,7 @@ python3 scripts/doctor.py
 │  - write_report_v53 (new)        │  │  - validate_pdf_header     │
 │  - exit codes 0/2/3/4/5          │  │  - generate_filename       │
 │                                  │  │                            │
-│ scripts/doctor.py (new v5.3)     │  │ scripts/v53_pipeline.py    │
+│ scripts/doctor.py (new v5.3)     │  │ scripts/postprocess.py     │
 │  - preflight check + REMEDIATION │  │  - analyze_pdf_batch       │
 │  - exit 2 on any fail            │  │  - rename_by_ocr           │
 │                                  │  │  - do_all_matching         │
@@ -628,7 +632,7 @@ for folio in hotel_folios:
 |------|------|
 | `scripts/download-invoices.py` | 端到端 CLI（推荐入口）|
 | `scripts/doctor.py` | v5.3 preflight 检查（Gmail / LLM / pdftotext / cache 目录）|
-| `scripts/v53_pipeline.py` | v5.3 后端下载的分析 / 重命名 / 匹配 / CSV / missing.json / zip |
+| `scripts/postprocess.py` | 下载后的分析 / 重命名 / 匹配 / CSV / missing.json / zip（v5.3 引入）|
 | `scripts/gmail-auth.py` | 一次性 OAuth 授权，生成 `token.json` |
 | `scripts/gmail-helper.py` | 快速 Gmail 搜索调试（`gmail-helper.py "query"`）|
 | `scripts/invoice_helpers.py` | 纯函数库（classify / extract / validate / normalize）|

@@ -67,7 +67,7 @@ from invoice_helpers import (  # noqa: E402
 )
 
 # v5.3 additions
-from v53_pipeline import (  # noqa: E402
+from postprocess import (  # noqa: E402
     analyze_pdf_batch,
     rename_by_ocr,
     do_all_matching,
@@ -448,7 +448,7 @@ def download_link(entry, pdfs_dir, log):
 
 # ─── v5.3 report ───────────────────────────────────────────────────────────
 # (v5.2 pair_folios_with_invoices + write_report removed in v5.3 — replaced by
-#  do_all_matching in v53_pipeline and write_report_v53 below.)
+#  do_all_matching in postprocess and write_report_v53 below.)
 
 def write_report_v53(
     path, *,

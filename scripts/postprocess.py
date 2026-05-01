@@ -134,7 +134,7 @@ def normalize_date(d: Optional[str]) -> str:
 
 
 # make_unique_path lives in invoice_helpers.py; re-exported here so callers
-# that already import v53_pipeline don't need a second import line.
+# that already import postprocess don't need a second import line.
 from invoice_helpers import make_unique_path  # noqa: E402
 
 

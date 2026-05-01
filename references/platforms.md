@@ -8,6 +8,31 @@ do with them. When adding support for a new platform, document it here first.
 entities rename/merge frequently; senders come from personal emails, brand
 emails, or third-party platforms. The download pattern is the stable signal.
 
+## Table of contents
+
+**Platforms with full PDF support** (classify_email decision tree routes here):
+
+- [百望云 (Baiwang)](#百望云-baiwang--the-big-one) — 3 templates (direct attachment / `pis.baiwang.com` preview / `u.baiwang.com` short link)
+- [fapiao.com](#fapiaocom) — direct PDF URL with token
+- [xforceplus 平台](#xforceplus-平台-tim-hortons-and-others) — Tim Hortons and others
+- [诺诺网 (Nuonuo)](#诺诺网-nuonuo) — SPA + hidden API pattern
+- [云票 (bwjf.cn)](#云票-bwjfcn) — `pdfUrl=` query param in redirect
+- [百旺金穗云 (广东税务局)](#百旺金穗云-广东税务局) — direct PDF with `Wjgs=PDF`
+- [滴滴出行 (Didi)](#滴滴出行-didi) — electronic invoice + trip receipt pairing
+- [12306 (火车票/行程报销单)](#12306-火车票行程报销单) — payment notifications filtered out; real tickets via 12306.cn
+- [中国移动 (China Mobile)](#中国移动-china-mobile--话费发票) — 话费发票
+- [51发票 (51fapiao)](#51发票-51fapiao)
+- [票通 (vpiaotong)](#票通-vpiaotong)
+- [麦当劳 (McDonald's)](#麦当劳-mcdonalds)
+- [Hotel folios (水单/账单)](#hotel-folios-水单账单) — Marriott, Hilton, IHG, various Chinese chains
+
+**Operational sections**:
+
+- [Platforms that CANNOT deliver PDF invoices by email](#platforms-that-cannot-deliver-pdf-invoices-by-email)
+- [Adding support for a new platform (reverse engineering playbook)](#adding-support-for-a-new-platform-reverse-engineering-playbook) — the 5-step playbook
+- [Cross-platform universal tips](#cross-platform-universal-tips)
+- [Sender → platform quick reference](#sender--platform-quick-reference)
+
 ---
 
 ## 百望云 (Baiwang) — the big one

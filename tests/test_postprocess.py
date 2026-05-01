@@ -45,7 +45,7 @@ from core.llm_ocr import (
     validate_and_fix_vendor_info,
 )
 from core.validation import validate_ocr_plausibility
-from v53_pipeline import (
+from postprocess import (
     CATEGORY_LABELS,
     _compute_convergence_hash,
     _to_matching_input,
@@ -1220,9 +1220,9 @@ class TestAnalyzePdfBatchAuthPropagation:
         def raising_get_client(override=None):
             raise LLMAuthError("ANTHROPIC_API_KEY not set")
         monkeypatch.setattr(llm_client, "get_client", raising_get_client)
-        # Also patch the import reference in v53_pipeline
-        import v53_pipeline
-        monkeypatch.setattr(v53_pipeline, "get_client", raising_get_client)
+        # Also patch the import reference in postprocess
+        import postprocess
+        monkeypatch.setattr(postprocess, "get_client", raising_get_client)
 
         pdf = tmp_path / "x.pdf"
         pdf.write_bytes(b"%PDF-1.4")
