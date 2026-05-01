@@ -1,8 +1,9 @@
 ---
 title: "refactor: Skill compliance cleanup + Agent contract evals"
 type: refactor
-status: active
+status: completed
 date: 2026-05-01
+completed: 2026-05-01
 origin: docs/brainstorms/2026-05-01-skill-compliance-and-evals-requirements.md
 ---
 
@@ -154,7 +155,7 @@ Origin doc: `docs/brainstorms/2026-05-01-skill-compliance-and-evals-requirements
 
 ## Implementation Units
 
-- [ ] **Unit 1: SKILL.md + references 合规微调**
+- [x] **Unit 1: SKILL.md + references 合规微调**
 
 **Goal:** 精简 `description` 到 ~100 词、给 `platforms.md` 加 ToC、在 SKILL.md 顶部加 OpenClaw 特化说明。不动 SKILL.md 大段落。
 
@@ -191,7 +192,7 @@ Origin doc: `docs/brainstorms/2026-05-01-skill-compliance-and-evals-requirements
 
 ---
 
-- [ ] **Unit 2: `v53_pipeline.py` → `postprocess.py` 去版本化重命名**
+- [x] **Unit 2: `v53_pipeline.py` → `postprocess.py` 去版本化重命名**
 
 **Goal:** 纯文件名重构，所有引用点同步更新，测试数保持 94 且全绿。不改任何函数签名或行为。
 
@@ -241,7 +242,7 @@ Origin doc: `docs/brainstorms/2026-05-01-skill-compliance-and-evals-requirements
 
 ---
 
-- [ ] **Unit 3: `tests/test_agent_contract.py` — Mock 驱动的 Agent 契约 evals**
+- [x] **Unit 3: `tests/test_agent_contract.py` — Mock 驱动的 Agent 契约 evals**
 
 **Goal:** 新增集成测试文件，覆盖 R8-R12 的五类 Agent 合约。用 monkeypatch `GmailClient._api_get` + `--llm-provider=none`（或局部 patch LLM）作 mock 面，不依赖任何网络、Gmail token 或 LLM key。
 
@@ -325,7 +326,7 @@ Origin doc: `docs/brainstorms/2026-05-01-skill-compliance-and-evals-requirements
 
 ---
 
-- [ ] **Unit 4: `evals/seasonal_smoke_test.md` 季度手动 smoke runbook**
+- [x] **Unit 4: `evals/seasonal_smoke_test.md` 季度手动 smoke runbook**
 
 **Goal:** 真实 Gmail + 真实 LLM 的人工校验 runbook。季度跑一次，验证真实 API 没变 quirk、LLM 没漂移，基本健康指标未退化。
 
