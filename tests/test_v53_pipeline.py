@@ -29,7 +29,9 @@ from core.llm_client import (
     LLMAuthError,
     LLMClient,
     LLMConfigError,
+    LLMError,
     LLMRateLimitError,
+    LLMServerError,
     extract_with_retry,
     get_client,
     reset_client,
@@ -46,6 +48,7 @@ from core.validation import validate_ocr_plausibility
 from v53_pipeline import (
     CATEGORY_LABELS,
     _compute_convergence_hash,
+    _to_matching_input,
     analyze_pdf_batch,
     do_all_matching,
     merge_supplemental_downloads,
@@ -690,3 +693,541 @@ class TestDoctorLLMMatrix:
         monkeypatch.setenv("LLM_PROVIDER", "claude-desktop")
         ok, msg = self._check()
         assert not ok and "Unknown LLM_PROVIDER" in msg
+
+
+# =============================================================================
+# Matching: P1 (remark) / P2 (date+amount) / P3 (v5.2 date-only fallback)
+# =============================================================================
+
+def _mkrecord(category, ocr_overrides, path="x.pdf"):
+    """Build a minimal download record with the fields do_all_matching needs."""
+    return {
+        "path": path,
+        "valid": True,
+        "category": category,
+        "ocr": ocr_overrides,
+    }
+
+
+class TestHotelMatchingTiers:
+    def test_p1_remark_matches_confirmation_no(self):
+        invoice = _mkrecord("HOTEL_INVOICE", {
+            "transactionAmount": 1280.00,
+            "transactionDate": "2026-03-19",
+            "remark": "HT20260319",
+        }, path="inv.pdf")
+        folio = _mkrecord("HOTEL_FOLIO", {
+            "balance": 1280.00,
+            "checkOutDate": "2026-03-19",
+            "confirmationNo": "HT20260319",
+        }, path="fol.pdf")
+
+        result = do_all_matching([invoice, folio])
+        assert len(result["hotel"]["matched"]) == 1
+        assert result["hotel"]["matched"][0]["match_type"] == "remark"
+
+    def test_p1_remark_matches_internal_codes(self):
+        invoice = _mkrecord("HOTEL_INVOICE", {
+            "transactionAmount": 1280.00,
+            "transactionDate": "2026-03-19",
+            "remark": "INTERNAL-42",
+        }, path="inv.pdf")
+        folio = _mkrecord("HOTEL_FOLIO", {
+            "balance": 1280.00,
+            "checkOutDate": "2026-03-19",
+            "confirmationNo": "SOMETHING-ELSE",
+            "internalCodes": ["INTERNAL-42", "INTERNAL-43"],
+        }, path="fol.pdf")
+
+        result = do_all_matching([invoice, folio])
+        assert len(result["hotel"]["matched"]) == 1
+        assert result["hotel"]["matched"][0]["match_type"] == "remark"
+
+    def test_p2_date_and_amount_match(self):
+        invoice = _mkrecord("HOTEL_INVOICE", {
+            "transactionAmount": 500.00,
+            "transactionDate": "2026-04-01",
+            # no remark
+        }, path="inv.pdf")
+        folio = _mkrecord("HOTEL_FOLIO", {
+            "balance": 500.00,
+            "checkOutDate": "2026-04-01",
+            "confirmationNo": "UNRELATED",
+        }, path="fol.pdf")
+
+        result = do_all_matching([invoice, folio])
+        assert len(result["hotel"]["matched"]) == 1
+        assert result["hotel"]["matched"][0]["match_type"] == "date_amount"
+
+    def test_p3_date_only_fallback_fires_only_when_p1_p2_miss(self):
+        """Amount differs (LLM missed VAT line), but date matches. P1+P2 miss, P3 catches."""
+        invoice = _mkrecord("HOTEL_INVOICE", {
+            "transactionAmount": 480.00,  # mismatched amount
+            "transactionDate": "2026-05-10",
+        }, path="inv.pdf")
+        folio = _mkrecord("HOTEL_FOLIO", {
+            "balance": 500.00,  # different from invoice
+            "checkOutDate": "2026-05-10",
+        }, path="fol.pdf")
+
+        result = do_all_matching([invoice, folio])
+        matched = result["hotel"]["matched"]
+        assert len(matched) == 1
+        assert matched[0]["match_type"] == "date_only (v5.2 fallback)"
+        assert matched[0]["confidence"] == "low"
+
+    def test_p3_does_not_fire_when_p2_already_matched(self):
+        """P2 exact match + a different invoice that would P3-match same folio —
+        the P3 candidate should stay unmatched (folio already taken)."""
+        inv_p2 = _mkrecord("HOTEL_INVOICE", {
+            "transactionAmount": 500.00,
+            "transactionDate": "2026-05-10",
+        }, path="inv1.pdf")
+        inv_p3 = _mkrecord("HOTEL_INVOICE", {
+            "transactionAmount": 999.00,  # amount diverges
+            "transactionDate": "2026-05-10",
+        }, path="inv2.pdf")
+        folio = _mkrecord("HOTEL_FOLIO", {
+            "balance": 500.00,
+            "checkOutDate": "2026-05-10",
+        }, path="fol.pdf")
+
+        result = do_all_matching([inv_p2, inv_p3, folio])
+        # Exactly one match — P2 wins, P3 invoice is unmatched
+        assert len(result["hotel"]["matched"]) == 1
+        assert result["hotel"]["matched"][0]["match_type"] == "date_amount"
+        assert len(result["hotel"]["unmatched_invoices"]) == 1
+
+    def test_unmatched_when_no_tier_fires(self):
+        invoice = _mkrecord("HOTEL_INVOICE", {
+            "transactionAmount": 500.00,
+            "transactionDate": "2026-03-01",
+        }, path="inv.pdf")
+        folio = _mkrecord("HOTEL_FOLIO", {
+            "balance": 500.00,
+            "checkOutDate": "2026-03-15",  # different date
+        }, path="fol.pdf")
+
+        result = do_all_matching([invoice, folio])
+        assert len(result["hotel"]["matched"]) == 0
+        assert len(result["hotel"]["unmatched_invoices"]) == 1
+        assert len(result["hotel"]["unmatched_folios"]) == 1
+
+
+class TestRideHailingTiebreaker:
+    def test_two_same_amount_invoices_pair_to_closest_receipt_by_file_number(self):
+        """3 invoices at 139.80 + 2 receipts at 139.80; receipts should pair to
+        the invoices whose (N) file-number is closest."""
+        invoices = [
+            _mkrecord("RIDEHAILING_INVOICE", {"transactionAmount": 139.80},
+                      path="didi_invoice (1).pdf"),
+            _mkrecord("RIDEHAILING_INVOICE", {"transactionAmount": 139.80},
+                      path="didi_invoice (2).pdf"),
+            _mkrecord("RIDEHAILING_INVOICE", {"transactionAmount": 139.80},
+                      path="didi_invoice (3).pdf"),
+        ]
+        receipts = [
+            _mkrecord("RIDEHAILING_RECEIPT", {"totalAmount": 139.80},
+                      path="didi_trip (1).pdf"),
+            _mkrecord("RIDEHAILING_RECEIPT", {"totalAmount": 139.80},
+                      path="didi_trip (2).pdf"),
+        ]
+        result = do_all_matching(invoices + receipts)
+        rh = result["ridehailing"]
+        assert len(rh["matched"]) == 2
+        # 2 of 3 invoices paired; 1 unmatched
+        assert len(rh["unmatched_invoices"]) == 1
+        # Each matched invoice is paired with a receipt of the same number
+        for m in rh["matched"]:
+            inv_name = m["invoice"]["s3Key"]
+            rec_name = m["receipt"]["s3Key"]
+            # Extract the (N) from each
+            import re
+            inv_n = re.search(r"\((\d+)\)", inv_name).group(1)
+            rec_n = re.search(r"\((\d+)\)", rec_name).group(1)
+            assert inv_n == rec_n, f"mismatched tiebreaker: {inv_name} ↔ {rec_name}"
+
+    def test_amount_mismatch_does_not_pair(self):
+        invoices = [
+            _mkrecord("RIDEHAILING_INVOICE", {"transactionAmount": 100.00},
+                      path="x.pdf"),
+        ]
+        receipts = [
+            _mkrecord("RIDEHAILING_RECEIPT", {"totalAmount": 200.00}, path="y.pdf"),
+        ]
+        result = do_all_matching(invoices + receipts)
+        assert len(result["ridehailing"]["matched"]) == 0
+        assert len(result["ridehailing"]["unmatched_invoices"]) == 1
+        assert len(result["ridehailing"]["unmatched_receipts"]) == 1
+
+    def test_none_amount_never_matches(self):
+        """_to_float preserves None (not 0), so an unknown amount can't accidentally
+        match another unknown-amount record."""
+        inv = _mkrecord("RIDEHAILING_INVOICE", {"transactionAmount": None},
+                        path="x.pdf")
+        rec = _mkrecord("RIDEHAILING_RECEIPT", {"totalAmount": None}, path="y.pdf")
+        result = do_all_matching([inv, rec])
+        assert len(result["ridehailing"]["matched"]) == 0
+
+
+# =============================================================================
+# parse_llm_response edge cases
+# =============================================================================
+
+class TestParseLLMResponse:
+    def test_plain_json(self):
+        assert parse_llm_response('{"a": 1}') == {"a": 1}
+
+    def test_json_fenced_with_language(self):
+        assert parse_llm_response('```json\n{"a": 1}\n```') == {"a": 1}
+
+    def test_json_fenced_without_language(self):
+        assert parse_llm_response('```\n{"a": 1}\n```') == {"a": 1}
+
+    def test_json_with_commentary(self):
+        text = 'Here is the invoice data:\n{"vendorName": "X", "amount": 100}\nThanks.'
+        result = parse_llm_response(text)
+        assert result["vendorName"] == "X"
+
+    def test_empty_response_raises(self):
+        with pytest.raises(ValueError, match="Empty"):
+            parse_llm_response("")
+
+    def test_whitespace_only_raises(self):
+        with pytest.raises(ValueError, match="Empty"):
+            parse_llm_response("   \n  \t ")
+
+    def test_malformed_json_raises(self):
+        with pytest.raises(json.JSONDecodeError):
+            parse_llm_response("not json at all, no braces")
+
+
+# =============================================================================
+# validate_and_fix_vendor_info — 4 recovery strategies
+# =============================================================================
+
+class TestValidateAndFixVendor:
+    def test_no_change_when_vendor_not_buyer(self):
+        data = {"vendorName": "无锡茵赫餐饮", "vendorTaxId": "91320214MA"}
+        result = validate_and_fix_vendor_info(dict(data))
+        assert result["vendorName"] == "无锡茵赫餐饮"
+        assert "_vendorNameInvalid" not in result
+
+    def test_strategy1_seller_fallback(self):
+        """LLM put buyer in vendorName, seller info was extracted correctly."""
+        data = {
+            "vendorName": "亚马逊信息服务",
+            "vendorTaxId": "buyer-tax",
+            "sellerName": "无锡茵赫餐饮",
+            "sellerTaxId": "91320214MA",
+        }
+        result = validate_and_fix_vendor_info(dict(data))
+        assert result["vendorName"] == "无锡茵赫餐饮"
+        assert result["vendorTaxId"] == "91320214MA"
+
+    def test_strategy2_hotel_name_fallback(self):
+        data = {
+            "vendorName": "亚马逊信息服务",
+            "hotelName": "无锡万怡酒店",
+        }
+        result = validate_and_fix_vendor_info(dict(data))
+        assert result["vendorName"] == "无锡万怡酒店"
+
+    def test_strategy3_buyer_seller_reversed(self):
+        data = {
+            "vendorName": "亚马逊信息服务",
+            "buyerName": "无锡茵赫餐饮",
+            "buyerTaxId": "91320214MA",
+        }
+        result = validate_and_fix_vendor_info(dict(data))
+        assert result["vendorName"] == "无锡茵赫餐饮"
+        assert result["vendorTaxId"] == "91320214MA"
+
+    def test_strategy4_nothing_to_recover_marks_invalid(self):
+        data = {"vendorName": "亚马逊信息服务"}  # no seller / hotel / buyer
+        result = validate_and_fix_vendor_info(dict(data))
+        assert result["vendorName"] == ""
+        assert result.get("_vendorNameInvalid") is True
+
+    def test_null_vendor_name_marked_invalid(self):
+        """Post-review fix #25: null/empty vendor should also mark invalid."""
+        data = {"vendorName": None}
+        result = validate_and_fix_vendor_info(dict(data))
+        assert result.get("_vendorNameInvalid") is True
+
+    def test_null_vendor_with_seller_fallback(self):
+        data = {"vendorName": None, "sellerName": "Real Seller"}
+        result = validate_and_fix_vendor_info(dict(data))
+        assert result["vendorName"] == "Real Seller"
+        assert not result.get("_vendorNameInvalid")
+
+
+# =============================================================================
+# missing.json state machine branches
+# =============================================================================
+
+def _empty_matching_result():
+    return {
+        "hotel": {"matched": [], "unmatched_invoices": [], "unmatched_folios": []},
+        "ridehailing": {"matched": [], "unmatched_invoices": [], "unmatched_receipts": []},
+    }
+
+
+class TestMissingJsonStateMachine:
+    def test_empty_items_converged(self, tmp_path):
+        path = tmp_path / "missing.json"
+        payload = write_missing_json(
+            str(path), batch_dir=str(tmp_path), iteration=1,
+            matching_result=_empty_matching_result(), unparsed_records=[],
+        )
+        assert payload["status"] == "converged"
+        assert payload["recommended_next_action"] == "stop"
+
+    def test_needs_retry_when_items_and_iteration_low(self, tmp_path):
+        # Build a fake unmatched hotel invoice so items is non-empty
+        mr = _empty_matching_result()
+        mr["hotel"]["unmatched_invoices"].append({
+            "_record": {"path": "inv.pdf", "ocr": {
+                "transactionDate": "2026-04-01", "vendorName": "X",
+                "transactionAmount": 100, "remark": "R",
+            }},
+        })
+        path = tmp_path / "missing.json"
+        payload = write_missing_json(
+            str(path), batch_dir=str(tmp_path), iteration=1, iteration_cap=3,
+            matching_result=mr, unparsed_records=[],
+        )
+        assert payload["status"] == "needs_retry"
+        assert payload["recommended_next_action"] == "run_supplemental"
+
+    def test_max_iterations_reached_when_cap_hit(self, tmp_path):
+        mr = _empty_matching_result()
+        mr["hotel"]["unmatched_invoices"].append({
+            "_record": {"path": "inv.pdf", "ocr": {"transactionDate": "2026-04-01"}},
+        })
+        path = tmp_path / "missing.json"
+        payload = write_missing_json(
+            str(path), batch_dir=str(tmp_path), iteration=3, iteration_cap=3,
+            matching_result=mr, unparsed_records=[],
+        )
+        assert payload["status"] == "max_iterations_reached"
+        assert payload["recommended_next_action"] == "ask_user"
+
+    def test_converged_when_hash_unchanged(self, tmp_path):
+        mr = _empty_matching_result()
+        mr["hotel"]["unmatched_invoices"].append({
+            "_record": {"path": "inv.pdf", "ocr": {"transactionDate": "2026-04-01"}},
+        })
+        path = tmp_path / "missing.json"
+        # First iteration — compute hash
+        p1 = write_missing_json(
+            str(path), batch_dir=str(tmp_path), iteration=1,
+            matching_result=mr, unparsed_records=[],
+        )
+        # Second iteration — same items → same hash → should converge early
+        p2 = write_missing_json(
+            str(path), batch_dir=str(tmp_path), iteration=2,
+            matching_result=mr, unparsed_records=[],
+            previous_convergence_hash=p1["convergence_hash"],
+        )
+        assert p2["status"] == "converged"
+        assert p2["recommended_next_action"] == "stop"
+
+    def test_user_action_required_when_only_extraction_failed(self, tmp_path):
+        path = tmp_path / "missing.json"
+        payload = write_missing_json(
+            str(path), batch_dir=str(tmp_path), iteration=1,
+            matching_result=_empty_matching_result(),
+            unparsed_records=[{"path": "bad.pdf", "error": "LLM returned junk"}],
+        )
+        assert payload["status"] == "user_action_required"
+        assert payload["recommended_next_action"] == "ask_user"
+
+
+# =============================================================================
+# _compute_convergence_hash properties
+# =============================================================================
+
+class TestConvergenceHash:
+    def test_identity_same_items_same_hash(self):
+        items = [
+            {"type": "hotel_folio", "needed_for": "a.pdf"},
+            {"type": "hotel_invoice", "needed_for": "b.pdf"},
+        ]
+        assert _compute_convergence_hash(items) == _compute_convergence_hash(list(items))
+
+    def test_order_insensitivity(self):
+        a = [{"type": "hotel_folio", "needed_for": "a.pdf"},
+             {"type": "hotel_invoice", "needed_for": "b.pdf"}]
+        b = list(reversed(a))
+        assert _compute_convergence_hash(a) == _compute_convergence_hash(b)
+
+    def test_type_change_changes_hash(self):
+        """Post-review fix #26: same filename different type must NOT collide."""
+        a = [{"type": "hotel_folio", "needed_for": "a.pdf"}]
+        b = [{"type": "extraction_failed", "needed_for": "a.pdf"}]
+        assert _compute_convergence_hash(a) != _compute_convergence_hash(b)
+
+    def test_added_item_changes_hash(self):
+        a = [{"type": "hotel_folio", "needed_for": "a.pdf"}]
+        b = a + [{"type": "hotel_folio", "needed_for": "b.pdf"}]
+        assert _compute_convergence_hash(a) != _compute_convergence_hash(b)
+
+    def test_empty_items_stable_hash(self):
+        h1 = _compute_convergence_hash([])
+        h2 = _compute_convergence_hash([])
+        assert h1 == h2
+        # And it's a 16-char hex string
+        assert len(h1) == 16 and all(c in "0123456789abcdef" for c in h1)
+
+
+# =============================================================================
+# SDK error classification (fix #4)
+# =============================================================================
+
+class TestErrorClassification:
+    def test_anthropic_rate_limit_error_detected(self):
+        # Build a fake SDK exception that looks like anthropic.RateLimitError
+        class RateLimitError(Exception):
+            def __init__(self, msg, status_code=429):
+                super().__init__(msg)
+                self.status_code = status_code
+
+        # extract_with_retry should classify this as retryable
+        class MC(LLMClient):
+            provider_name = "mock"
+            def __init__(self): self.calls = 0
+            def extract_from_pdf(self, b, p):
+                self.calls += 1
+                if self.calls < 2:
+                    # Simulate SDK throwing the typed exception, which our wrapper
+                    # maps via _reraise_as_llm_error
+                    from core.llm_client import _reraise_as_llm_error
+                    try:
+                        raise RateLimitError("rate limited", 429)
+                    except Exception as e:
+                        _reraise_as_llm_error(e)
+                return '{"ok": true}'
+
+        mc = MC()
+        result = extract_with_retry(b"x", "p", client=mc, base_delay=0.01)
+        assert mc.calls == 2
+        assert result == '{"ok": true}'
+
+    def test_botocore_throttling_mapped_to_rate_limit(self):
+        """boto3 ClientError with ThrottlingException code → LLMRateLimitError."""
+        from core.llm_client import _reraise_as_llm_error
+
+        class FakeClientError(Exception):
+            def __init__(self):
+                super().__init__("An error occurred (ThrottlingException)")
+                self.response = {"Error": {"Code": "ThrottlingException"}}
+
+        with pytest.raises(LLMRateLimitError):
+            try:
+                raise FakeClientError()
+            except Exception as e:
+                _reraise_as_llm_error(e)
+
+    def test_botocore_access_denied_mapped_to_auth(self):
+        from core.llm_client import _reraise_as_llm_error
+
+        class FakeClientError(Exception):
+            def __init__(self):
+                super().__init__("AccessDeniedException")
+                self.response = {"Error": {"Code": "AccessDeniedException"}}
+
+        with pytest.raises(LLMAuthError):
+            try:
+                raise FakeClientError()
+            except Exception as e:
+                _reraise_as_llm_error(e)
+
+    def test_apitimeout_mapped_to_server_error(self):
+        from core.llm_client import _reraise_as_llm_error
+
+        class APITimeoutError(Exception):
+            pass
+
+        with pytest.raises(LLMServerError):
+            try:
+                raise APITimeoutError("timeout")
+            except Exception as e:
+                _reraise_as_llm_error(e)
+
+    def test_substring_fallback_still_works(self):
+        """Generic exception with '429' in message should still classify as rate limit."""
+        from core.llm_client import _reraise_as_llm_error
+
+        with pytest.raises(LLMRateLimitError):
+            try:
+                raise Exception("HTTP 429 too many requests")
+            except Exception as e:
+                _reraise_as_llm_error(e)
+
+    def test_unknown_error_becomes_generic_llm_error(self):
+        from core.llm_client import _reraise_as_llm_error
+
+        with pytest.raises(LLMError) as exc_info:
+            try:
+                raise Exception("some weird error with no identifiable keywords")
+            except Exception as e:
+                _reraise_as_llm_error(e)
+        # Should be LLMError, not a specific subclass
+        assert type(exc_info.value).__name__ == "LLMError"
+
+
+# =============================================================================
+# Fix #17 — calendar-invalid dates rejected by normalize_date
+# =============================================================================
+
+class TestNormalizeDate:
+    def test_valid_iso_date(self):
+        assert normalize_date("2026-03-19") == "20260319"
+
+    def test_single_digit_components(self):
+        assert normalize_date("2026-3-5") == "20260305"
+
+    def test_yyyymmdd_shorthand(self):
+        assert normalize_date("20260319") == "20260319"
+
+    def test_calendar_invalid_rejected(self):
+        """Post-review fix #17: 2026-02-31 is not a valid date."""
+        assert normalize_date("2026-02-31") == ""
+
+    def test_month_out_of_range(self):
+        assert normalize_date("2026-13-05") == ""
+
+    def test_empty_returns_empty(self):
+        assert normalize_date("") == ""
+        assert normalize_date(None) == ""
+
+    def test_garbage_returns_empty(self):
+        assert normalize_date("not a date") == ""
+
+
+# =============================================================================
+# Fix #1 — LLMAuthError propagates from analyze_pdf_batch
+# =============================================================================
+
+class TestAnalyzePdfBatchAuthPropagation:
+    def test_auth_error_propagates_not_swallowed(self, tmp_path, monkeypatch):
+        """Post-review fix #1: analyze_pdf_batch must re-raise LLMAuthError so
+        the CLI can exit with EXIT_LLM_CONFIG instead of silently UNPARSING
+        every record."""
+        # Force get_client() to raise LLMAuthError
+        from core import llm_client
+        def raising_get_client(override=None):
+            raise LLMAuthError("ANTHROPIC_API_KEY not set")
+        monkeypatch.setattr(llm_client, "get_client", raising_get_client)
+        # Also patch the import reference in v53_pipeline
+        import v53_pipeline
+        monkeypatch.setattr(v53_pipeline, "get_client", raising_get_client)
+
+        pdf = tmp_path / "x.pdf"
+        pdf.write_bytes(b"%PDF-1.4")
+        records = [{"path": str(pdf), "valid": True, "message_id": "m1"}]
+
+        # Must raise, not return results with all-UNPARSED
+        with pytest.raises(LLMAuthError):
+            analyze_pdf_batch(records, use_llm=True)
