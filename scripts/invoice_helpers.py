@@ -257,7 +257,7 @@ def extract_merchant_from_attachment_filename(filename):
 
     ⚠️ Ambiguity: the {merchant} field may be either the SELLER or the BUYER
     depending on who sent the email:
-      - 酒店财务代发 (e.g. `17768335659@163.com`) → seller (“鲁能泰山...万豪酒店”)
+      - 酒店财务代发 (e.g. `1XXXXXXXXXX@163.com` — 前台手机号前缀) → seller (“鲁能泰山...万豪酒店”)
       - 百望云/诺诺网代发 → buyer (“亚马逊信息服务...有限公司”)
 
     To stay safe, reject obvious buyer-side names (Kent's company markers).

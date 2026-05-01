@@ -93,7 +93,7 @@ Gmail OAuth uses raw HTTPS + hand-rolled token refresh in `GmailClient._api_get`
 
 ## Test fixtures
 
-Integration tests use real anonymized PDFs from `/Users/kentpeng/Documents/agent Test/` (see `tests/conftest.py` fixtures). Tests are marked `pytest.skip` when the directory is absent, so the suite stays portable.
+Integration tests use real anonymized PDFs from `~/Documents/agent Test/` by default (override with `GMAIL_INVOICE_FIXTURES` env var; see `tests/conftest.py`). Tests are marked `pytest.skip` when the directory is absent, so the suite stays portable.
 
 ## References
 

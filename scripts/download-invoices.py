@@ -483,9 +483,9 @@ def download_link(entry, pdfs_dir, log, known_paths=None):
 
 # ─── v5.3 report ───────────────────────────────────────────────────────────
 # (v5.2 pair_folios_with_invoices + write_report removed in v5.3 — replaced by
-#  do_all_matching in postprocess and write_report_v53 below.)
+#  do_all_matching in postprocess and write_report_md below.)
 
-def write_report_v53(
+def write_report_md(
     path, *,
     downloaded_all, failed, skipped,
     matching_result,
@@ -1024,7 +1024,7 @@ def main():
 
     # --- Step 9a: write 下载报告.md ---
     report_path = os.path.join(output_dir, "下载报告.md")
-    write_report_v53(
+    write_report_md(
         report_path,
         downloaded_all=downloaded_all, failed=failed, skipped=skipped,
         matching_result=matching_result,

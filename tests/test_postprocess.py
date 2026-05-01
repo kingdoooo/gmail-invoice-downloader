@@ -130,7 +130,9 @@ class TestPathTraversal:
 
 class TestHallucinationDetection:
     def test_wildly_wrong_amount_flagged_low(self):
-        pdf_path = "/Users/kentpeng/Documents/agent Test/滴滴电子发票 (1).pdf"
+        pdf_path = os.path.expanduser(
+            os.environ.get("GMAIL_INVOICE_FIXTURES", "~/Documents/agent Test")
+        ) + "/滴滴电子发票 (1).pdf"
         if not os.path.exists(pdf_path):
             pytest.skip("fixture missing")
         ocr = {"transactionAmount": 999999.00, "transactionDate": "2025-12-09"}
@@ -141,7 +143,9 @@ class TestHallucinationDetection:
         # We don't know the real amount in the fixture without running LLM,
         # but we can test with a synthetic pdf + known text.
         import subprocess
-        pdf_path = "/Users/kentpeng/Documents/agent Test/滴滴电子发票 (1).pdf"
+        pdf_path = os.path.expanduser(
+            os.environ.get("GMAIL_INVOICE_FIXTURES", "~/Documents/agent Test")
+        ) + "/滴滴电子发票 (1).pdf"
         if not os.path.exists(pdf_path):
             pytest.skip("fixture missing")
         # Pull out the real amount from the PDF to use as "LLM output"
@@ -2137,7 +2141,7 @@ class TestPrintOpenClawSummary:
         expected = "12.35"
         assert expected in csv_text
         assert expected in stdout_text
-        # MD rendering — via write_report_v53
+        # MD rendering — via write_report_md
         md_path = tmp_path / "report.md"
         # Minimal shim: build via dispatch-style call is cumbersome; just
         # assert the Decimal itself renders identically:

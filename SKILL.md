@@ -394,7 +394,7 @@ python3 scripts/download-invoices.py \
   "status": "needs_retry",                        // converged | needs_retry | max_iterations_reached | user_action_required
   "recommended_next_action": "run_supplemental",  // run_supplemental | stop | ask_user
   "convergence_hash": "a1b2c3d4e5f6...",
-  "batch_dir": "/Users/kent/invoices/2026-Q1",
+  "batch_dir": "~/invoices/2026-Q1",
   "items": [
     {
       "type": "hotel_folio",                      // | hotel_invoice | ridehailing_receipt | ridehailing_invoice | extraction_failed
@@ -578,7 +578,7 @@ python3 scripts/probe-platform.py "https://新平台.com/xxx"
 3. **邮件正文** 匹配 `XXX 为您开具了电子发票`、`销售方名称：XXX`、`开票单位：XXX`
 4. **sender 域名** 兜底（返回品牌级名如"万豪酒店"，精度最低）
 
-酒店发票可能从 3 种渠道来：酒店系统邮箱 / 前台个人邮箱（如 `17768335659@163.com`）/ 百望云代发，**不能只看 sender**。
+酒店发票可能从 3 种渠道来：酒店系统邮箱 / 前台个人邮箱（如 `1XXXXXXXXXX@163.com` — 前台手机号作邮箱前缀）/ 百望云代发，**不能只看 sender**。
 
 ### 🟡 Google Play 海外收据 / 银行月结单是噪音
 

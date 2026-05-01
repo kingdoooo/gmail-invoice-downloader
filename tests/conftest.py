@@ -13,7 +13,12 @@ if str(SCRIPTS) not in sys.path:
 import pytest
 
 
-FIXTURE_PDFS = Path("/Users/kentpeng/Documents/agent Test")
+# Override with env var GMAIL_INVOICE_FIXTURES to point at your own sample PDFs.
+# When the directory doesn't exist, fixture-dependent tests are skipped — so
+# the suite still runs fully on CI / fresh clones without the local samples.
+FIXTURE_PDFS = Path(
+    os.environ.get("GMAIL_INVOICE_FIXTURES", "~/Documents/agent Test")
+).expanduser()
 
 
 @pytest.fixture

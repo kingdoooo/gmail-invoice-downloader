@@ -692,7 +692,7 @@ def worst_of(*values: str) -> str:
 class MergedRow:
     """One row in the aggregated summary.
 
-    Consumed by write_summary_csv, write_report_v53, print_openclaw_summary —
+    Consumed by write_summary_csv, write_report_md, print_openclaw_summary —
     all three writers read the same object so the rendered numbers never
     diverge.
     """

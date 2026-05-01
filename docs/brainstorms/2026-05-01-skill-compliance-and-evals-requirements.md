@@ -86,7 +86,7 @@ topic: skill-compliance-and-evals
 ## Dependencies / Assumptions
 
 - **真实 Gmail 季度 smoke 依赖**：`~/.openclaw/credentials/gmail/token.json` 长期有效（Google refresh token 默认无过期，除非 scope 改变或 6 个月无活动）。B 类 eval runbook 里需要注明"token 失效时先跑 scripts/gmail-auth.py"。
-- **真实 PDF fixtures 已存在**：`/Users/kentpeng/Documents/agent Test/` 下的 ≥ 6 份 PDF 是 A 类 eval 的匹配场景输入来源。若未来迁移开发机，该路径需要同步。`conftest.py` 已用 `pytest.skip` 处理缺失情况，所以 fixture 缺失不会导致假失败，但会掉测试覆盖——这是目前已接受的状态。
+- **真实 PDF fixtures 已存在**：`~/Documents/agent Test/` 下的 ≥ 6 份 PDF 是 A 类 eval 的匹配场景输入来源（可用 `GMAIL_INVOICE_FIXTURES` env var 覆盖到别的目录）。若未来迁移开发机，该路径需要同步。`conftest.py` 已用 `pytest.skip` 处理缺失情况，所以 fixture 缺失不会导致假失败，但会掉测试覆盖——这是目前已接受的状态。
 - **假设 mock Gmail 的响应 JSON 能精准复现真实 API**：messages.list 分页、messages.get 全文、attachments.get base64 三个端点的响应 schema 稳定，Google 不会在近期做破坏性改动。这是 `GmailClient._api_get` 手写而非用 google-api-python-client 带来的风险——mock 的准确度靠手写 JSON 保证。
 
 ## Outstanding Questions

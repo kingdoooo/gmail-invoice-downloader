@@ -338,7 +338,7 @@ class TestExitCodeContract:
 
 class TestMatchingTiersContract:
     """P1/P2/P3 matching tiers must surface in the report output.  We drive
-    do_all_matching + write_report_v53 directly (without the full CLI run) to
+    do_all_matching + write_report_md directly (without the full CLI run) to
     keep the test fast while still exercising the report formatting layer
     where the ⚠️ low-confidence marker is emitted.
     """
@@ -349,7 +349,7 @@ class TestMatchingTiersContract:
         matching_result = postprocess.do_all_matching(records)
         aggregation = postprocess.build_aggregation(matching_result, records)
         report_path = tmp_path / "下载报告.md"
-        cli_module.write_report_v53(
+        cli_module.write_report_md(
             str(report_path),
             downloaded_all=records,
             failed=[],

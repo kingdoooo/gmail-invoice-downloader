@@ -90,7 +90,7 @@ Origin doc: `docs/brainstorms/2026-05-01-skill-compliance-and-evals-requirements
 - 一致的 "Test<FunctionalArea>" 命名，method 都是 `test_<specific_behavior>`
 
 **Fixtures 已就位**
-- `tests/conftest.py:19-48` — `hotel_invoice_pdf / hotel_folio_pdf / didi_invoice_pdf / didi_receipt_pdf` fixture，指向 `/Users/kentpeng/Documents/agent Test/` 的真实 PDF
+- `tests/conftest.py:19-48` — `hotel_invoice_pdf / hotel_folio_pdf / didi_invoice_pdf / didi_receipt_pdf` fixture，指向 `~/Documents/agent Test/`（可由 `GMAIL_INVOICE_FIXTURES` env var 覆盖）的真实 PDF
 - `pytest.skip` 在缺失时跳过，所以 CI 里如果 fixture 缺失不会假失败，但会降覆盖——这是可接受状态
 
 **v53_pipeline 全部引用点（Unit 2 重命名必须覆盖）**
@@ -344,7 +344,7 @@ Origin doc: `docs/brainstorms/2026-05-01-skill-compliance-and-evals-requirements
 `references/seasonal-smoke.md` 按如下结构：
 
 1. **When to run**: 每季度末 / v5.X 大重构完成 / 新 LLM provider 上线后
-2. **Prerequisites**: `token.json` 有效、`LLM_PROVIDER` 已 export、`/Users/kentpeng/Documents/agent Test/` 存在
+2. **Prerequisites**: `token.json` 有效、`LLM_PROVIDER` 已 export、`~/Documents/agent Test/`（或 `$GMAIL_INVOICE_FIXTURES`）存在
 3. **Command**: `python3 scripts/download-invoices.py --start <今天-90 天> --end <今天> --output ~/tmp/smoke-$(date +%Y%m%d)`
 4. **Expected timing**: 90-120 秒
 5. **Pass criteria**（必过 assertions，全是"基本健康"不碰具体匹配数）:

@@ -43,7 +43,7 @@ San Francisco, California 94114
 United States
 support@termius.com
 
-Bill to  kingdooo@gmail.com
+Bill to  user@example.com
 
 US EIN 38-4097286
 
