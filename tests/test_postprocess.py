@@ -181,6 +181,104 @@ class TestHallucinationDetection:
 
 
 # =============================================================================
+# Regression — pdftotext amount regex (was greedy-cutting 4+ digit decimals)
+#
+# 2025-Q4 report flagged several rows as `_amountConfidence=low` whose
+# LLM-extracted amounts were actually correct:
+#   南京景枫 1125.19,  南京四方 1574.97,  杭州钱江万怡 1560.10,
+#   上海滴滴 2944.80,  上海滴滴 2068.90
+#
+# Root cause: the old regex `\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?|\d+\.\d{1,2}`
+# allowed the first branch to succeed on just 3 bare digits (no comma, no
+# dot required), so `1125.19` was chopped into `['112', '5.19']` and 10%
+# tolerance couldn't recover. Dates and 20-digit invoice numbers also
+# leaked in as `[202, 10, 29]` / `[253, 270, ...]` noise.
+#
+# Fix: make the first branch require a real thousands separator
+# (`(?:,\d{3})+`), so bare integers never match and decimals must include
+# the dot via branch 2.
+# =============================================================================
+
+
+class TestAmountRegexRegression:
+    def _matches(self, text: str):
+        from core.validation import _AMOUNT_RE
+        return [m.group(1) for m in _AMOUNT_RE.finditer(text)]
+
+    def test_four_digit_decimal_not_chopped(self):
+        """1125.19 must match whole — was ['112', '5.19'] under old regex."""
+        assert self._matches("合计 1125.19") == ["1125.19"]
+
+    def test_ride_hailing_case_not_chopped(self):
+        """2944.80 must match whole — the Q4 smoke-test report case."""
+        assert self._matches("¥2944.80") == ["2944.80"]
+
+    def test_thousands_separator_still_works(self):
+        """Kept support for the comma-style `1,234.56`."""
+        assert self._matches("¥1,234.56") == ["1,234.56"]
+
+    def test_million_with_commas(self):
+        assert self._matches("¥1,000,000.00") == ["1,000,000.00"]
+
+    def test_date_does_not_leak(self):
+        """Dates like 2025-10-29 used to produce [202, 10, 29] noise."""
+        assert self._matches("开票日期 2025-10-29") == []
+
+    def test_invoice_number_does_not_leak(self):
+        """20-digit invoiceNo used to be chopped into [253, 270, ...]."""
+        assert self._matches("发票号码: 25327000001619791763") == []
+
+    def test_bare_integer_no_longer_matches(self):
+        """New behavior: bare integers without decimal or comma don't match.
+        Acceptable for Chinese invoices where every amount has `.00`."""
+        assert self._matches("¥500") == []
+        assert self._matches("总计 1234") == []
+
+    def test_multiple_amounts_same_line(self):
+        assert self._matches("合计 ¥1,280.00 税额 ¥50.00") == ["1,280.00", "50.00"]
+
+    def test_end_to_end_plausibility_for_buggy_case(self, tmp_path):
+        """Simulate the original Q4 failure: a PDF containing 1125.19 on the
+        page; validate_ocr_plausibility must NOT flag 1125.19 as low-confidence.
+
+        Uses a text file + a pdftotext shim so this test doesn't need a real
+        PDF fixture (keeps the suite fully portable).
+        """
+        from unittest.mock import patch
+        # Simulate pdftotext output — a hotel folio line
+        pdf_text = b"""
+        Hotel Invoice
+        Room charge         1125.19
+        Service fee            0.00
+        Total due          1125.19
+        Date 2025-10-14
+        Invoice No 25327000001619791763
+        """
+        fake_pdf = tmp_path / "hotel.pdf"
+        fake_pdf.write_bytes(b"%PDF-1.4 stub")
+
+        import subprocess as sp_real
+        def fake_run(cmd, **kwargs):
+            # Only intercept the pdftotext call
+            if cmd and cmd[0] == "pdftotext":
+                import types
+                return types.SimpleNamespace(
+                    returncode=0, stdout=pdf_text, stderr=b""
+                )
+            return sp_real.run(cmd, **kwargs)
+
+        with patch("core.validation.subprocess.run", side_effect=fake_run):
+            ocr = {"transactionAmount": 1125.19, "transactionDate": "2025-10-14"}
+            result = validate_ocr_plausibility(ocr, pdf_path=str(fake_pdf))
+
+        # The core invariant: the old buggy regex flagged this; new one must not.
+        assert result.get("_amountConfidence") != "low", (
+            "1125.19 is literally on the page; regex must not chop it into "
+            "fragments that fail the 10% tolerance check"
+        )
+
+
+# =============================================================================
 # #28 HIGH — retry/backoff
 # =============================================================================
 

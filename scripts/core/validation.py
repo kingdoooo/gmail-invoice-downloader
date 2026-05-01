@@ -26,8 +26,26 @@ import subprocess
 from typing import Any, Dict, List, Optional
 
 
-# Regex: matches ¥1,234.56 / 1234.56 / ￥1,234 etc.
-_AMOUNT_RE = re.compile(r"(?:[¥￥]|\brmb\s*)?\s*(\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?|\d+\.\d{1,2})")
+# Regex: matches amounts that LOOK LIKE MONEY — must have either a thousands
+# separator (¥1,234 / 1,234.56) or a decimal point (1234.56).
+#
+# A bare sequence of digits without comma/point intentionally does NOT match.
+# This is the key to avoiding three classes of prior false positives:
+#   1. "1125.19" being greedy-cut into "112" + "5.19" by the old regex — the
+#      old first branch `\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?` could succeed on
+#      just the first 3 digits with no comma and no decimal, stealing the
+#      prefix from a 4+ digit amount. Requiring `+` on the thousands group
+#      forces the first branch to need a real comma, so `1125.19` now falls
+#      to branch 2 and matches whole.
+#   2. Dates like "2025-10-29" being picked up as [2025, 10, 29] or [202, ..].
+#   3. 20-digit invoice numbers being chopped into [253, 270, ...] junk.
+#
+# Trade-off: amounts written as pure integers without decimals or commas
+# (e.g. "¥500" on a minimalist receipt) no longer match. In practice every
+# Chinese 增值税发票 writes amounts as `1234.56` or `1,234.56`, so this is
+# acceptable. The ID-filter `val > 9999 and "." not in raw` below is now
+# dead code given the new regex, but kept as belt-and-suspenders.
+_AMOUNT_RE = re.compile(r"(?:[¥￥]|\brmb\s*)?\s*(\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?|\d+\.\d{1,2})")
 
 
 def _extract_amounts_from_pdf(pdf_path: str) -> List[float]:
