@@ -1124,6 +1124,7 @@ def print_openclaw_summary(
     missing_status: str,
     date_range: Tuple[str, str],
     writer: Callable[[str], None] = print,
+    ignored_count: int = 0,  # v5.7 Unit 4
 ) -> None:
     """Render a ≤20-line summary to stdout (and optionally run.log via writer).
 
@@ -1225,6 +1226,12 @@ def print_openclaw_summary(
         )
     else:  # ask_user
         writer(f"👉 下一步：需人工核查 — 见 {abs_md} 末尾「⚠️ 需人工核查」区")
+    # 9.5. v5.7 Unit 4: IGNORED count line (only if any were filtered)
+    if ignored_count:
+        writer(
+            f"📭 已忽略 {ignored_count} 张非报销票据"
+            f"（详见下载报告.md §已忽略的非报销票据）"
+        )
     # 10. Blank
     writer("")
     # 11. Deliverables
@@ -1675,6 +1682,13 @@ def zip_output(
                 # PDF whose LLM-extracted vendor happens to begin with 发票打包_
                 # isn't silently dropped from the output.
                 if fn.startswith(ZIP_PREFIX) and fn.endswith(".zip"):
+                    continue
+                # v5.7 Unit 4: IGNORED_ prefix files are non-reimbursable
+                # receipts (SaaS subscriptions, marketing). They stay in
+                # output_dir for the user's audit trail but don't enter
+                # the deliverable zip. UNPARSED_ files still zip (user
+                # needs to see failed-to-parse receipts).
+                if fn.startswith("IGNORED_"):
                     continue
                 # Refuse symlinks so an attacker-placed symlink inside output_dir
                 # can't exfiltrate files from outside the tree via the zip.

@@ -504,6 +504,7 @@ def write_report_md(
     supplemental: bool,
     aggregation=None,
     out_of_range_items=None,   # v5.5 — skipped cross-quarter items
+    ignored_records=None,      # v5.7 Unit 4 — IGNORED records for §已忽略 + CTA
 ):
     """Emit 下载报告.md reflecting v5.3 matching (P1/P2/P3 + ride-hailing + unparsed)
     and supplemental loop context.
@@ -728,6 +729,52 @@ def write_report_md(
             lines.append(f"- `{os.path.basename(rec.get('path',''))}` — {err[:80]}")
         lines.append("")
 
+    # ── v5.7 IGNORED 非报销票据 + learned_exclusions CTA ──
+    if ignored_records:
+        lines.append(f"## 📭 已忽略的非报销票据 ({len(ignored_records)})\n")
+        lines.append(
+            "以下票据被识别为非发票 / 非水单 / 非行程单，已自动过滤，"
+            "不进入 CSV / 打包 zip。文件仍保留在 PDFs 目录下以 `IGNORED_` "
+            "前缀标记，可人工核查。\n"
+        )
+        # Per-record listing: show sender_email + amount
+        for rec in ignored_records:
+            sender_email = rec.get("sender_email") or ""
+            label = sender_email if sender_email else "未知发件人"
+            ocr = rec.get("ocr") or {}
+            amount = ocr.get("transactionAmount")
+            currency = ocr.get("currency") or ""
+            if amount is not None:
+                prefix = "¥" if not currency or currency == "CNY" else ""
+                suffix = f" {currency}" if currency and currency != "CNY" else ""
+                lines.append(f"- {label}：{prefix}{amount:.2f}{suffix}")
+            else:
+                lines.append(f"- {label}：金额未识别")
+        lines.append("")
+
+        # CTA: aggregate by email domain, render -from:<domain> lines
+        domain_counts = {}
+        for rec in ignored_records:
+            sender_email = rec.get("sender_email") or ""
+            if "@" not in sender_email:
+                continue
+            domain = sender_email.split("@", 1)[-1]
+            if not domain:
+                continue
+            domain_counts[domain] = domain_counts.get(domain, 0) + 1
+
+        if domain_counts:
+            lines.append(
+                "💡 下次避免 OCR 成本：可把这些 sender 加到 "
+                "`learned_exclusions.json`\n"
+            )
+            lines.append("```")
+            for domain in sorted(domain_counts.keys()):
+                n = domain_counts[domain]
+                lines.append(f"-from:{domain}       # 已过滤 {n} 次")
+            lines.append("```")
+            lines.append("")
+
     # ── v5.5 跨季度边界项（无需补搜） ──
     if out_of_range_items:
         lines.append(
@@ -943,6 +990,7 @@ def _run_postprocess_only(
         supplemental=False,
         aggregation=aggregation,
         out_of_range_items=missing_payload.get("out_of_range_items", []),
+        ignored_records=ignored_records,
     )
     say(f"\n✅ Report:   {report_path}")
 
@@ -978,6 +1026,7 @@ def _run_postprocess_only(
         missing_status=missing_payload["recommended_next_action"],
         date_range=(run_start_date or "?", run_end_date or "?"),
         writer=say,
+        ignored_count=len(ignored_records),
     )
 
     # --- Exit semantics ---
@@ -1363,6 +1412,7 @@ def main():
         supplemental=args.supplemental,
         aggregation=aggregation,
         out_of_range_items=missing_payload.get("out_of_range_items", []),
+        ignored_records=ignored_records,
     )
     say(f"\n✅ Report:   {report_path}")
 
@@ -1397,6 +1447,7 @@ def main():
         missing_status=missing_payload["recommended_next_action"],
         date_range=(args.start, args.end),
         writer=say,
+        ignored_count=len(ignored_records),
     )
 
     # --- Exit code ---

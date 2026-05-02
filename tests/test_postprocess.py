@@ -574,6 +574,29 @@ class TestZipAtomic:
         # Partial zip must have been cleaned up
         assert not any(p.name.endswith(".zip.tmp") for p in tmp_path.iterdir())
 
+    def test_ignored_prefix_excluded_from_zip(self, tmp_path):
+        """Unit 4 R3: IGNORED_*.pdf is excluded from the deliverable zip.
+        UNPARSED_*.pdf behavior is preserved (still zipped).
+        """
+        from postprocess import zip_output
+        out = tmp_path / "batch"
+        out.mkdir()
+        pdfs = out / "pdfs"
+        pdfs.mkdir()
+        (pdfs / "20251112_Marriott_水单.pdf").write_bytes(b"%PDF hotel")
+        (pdfs / "IGNORED_termius_Q9YJOO4I.pdf").write_bytes(b"%PDF saas")
+        (pdfs / "UNPARSED_abc_bad.pdf").write_bytes(b"%PDF broken")
+        (out / "下载报告.md").write_text("report")
+        (out / "发票汇总.csv").write_text("csv")
+
+        zp = zip_output(str(out))
+        import zipfile
+        with zipfile.ZipFile(zp) as zf:
+            names = {os.path.basename(n) for n in zf.namelist()}
+        assert "20251112_Marriott_水单.pdf" in names
+        assert "UNPARSED_abc_bad.pdf" in names  # preserved
+        assert "IGNORED_termius_Q9YJOO4I.pdf" not in names  # excluded
+
 
 # =============================================================================
 # #19 HIGH — CSV UTF-8 BOM + None-safe
@@ -3111,6 +3134,65 @@ class TestPrintOpenClawSummary:
             f"but lines after it: {lines[end_idx+1:]}"
         )
 
+    # -- Unit 4 R3: ignored_count line (v5.7) -----------------------------
+
+    def test_ignored_count_line_rendered_when_nonzero(self):
+        """Unit 4 R3: print_openclaw_summary emits '📭 已忽略 N 张非报销票据'
+        when ignored_count > 0.
+        """
+        from postprocess import print_openclaw_summary
+        aggregation = {
+            "rows": [],
+            "subtotals": {},
+            "unmatched": {"hotel_invoices": 0, "hotel_folios": 0,
+                          "rh_invoices": 0, "rh_receipts": 0},
+            "voucher_count": 1,
+            "low_conf": {"count": 0, "amount": 0.0},
+            "grand_total": 100.0,
+        }
+        lines = []
+        print_openclaw_summary(
+            aggregation,
+            output_dir="/tmp/out",
+            zip_path="/tmp/out/发票打包.zip",
+            csv_path="/tmp/out/发票汇总.csv",
+            md_path="/tmp/out/下载报告.md",
+            log_path="/tmp/out/run.log",
+            missing_status="stop",
+            date_range=("2025/01/01", "2025/03/31"),
+            writer=lines.append,
+            ignored_count=3,
+        )
+        text = "\n".join(lines)
+        assert "📭 已忽略 3 张非报销票据" in text
+
+    def test_ignored_count_zero_omits_line(self):
+        from postprocess import print_openclaw_summary
+        aggregation = {
+            "rows": [],
+            "subtotals": {},
+            "unmatched": {"hotel_invoices": 0, "hotel_folios": 0,
+                          "rh_invoices": 0, "rh_receipts": 0},
+            "voucher_count": 1,
+            "low_conf": {"count": 0, "amount": 0.0},
+            "grand_total": 100.0,
+        }
+        lines = []
+        print_openclaw_summary(
+            aggregation,
+            output_dir="/tmp/out",
+            zip_path="/tmp/out/发票打包.zip",
+            csv_path="/tmp/out/发票汇总.csv",
+            md_path="/tmp/out/下载报告.md",
+            log_path="/tmp/out/run.log",
+            missing_status="stop",
+            date_range=("2025/01/01", "2025/03/31"),
+            writer=lines.append,
+            ignored_count=0,
+        )
+        text = "\n".join(lines)
+        assert "已忽略" not in text
+
 
 class TestPromptContract:
     """Unit 0 R5: guard the hotel-field conditional extraction rule in prompts.py.
@@ -3439,3 +3521,106 @@ class TestRenameIgnoredBranch:
         assert basename.startswith("UNPARSED_")
         assert basename.endswith(".pdf")
         assert os.path.exists(record["path"])
+
+
+class TestIgnoredCtaRendering:
+    """Unit 4 R3: write_report_md renders '📭 已忽略的非报销票据 (N)' section
+    plus a learned_exclusions.json CTA block listing -from:<domain> hints
+    aggregated per sender domain.
+    """
+
+    def _load_write_report_md(self):
+        """Load the function from scripts/download-invoices.py (dash in filename
+        prevents plain import)."""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "download_invoices", "scripts/download-invoices.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod.write_report_md
+
+    def _base_args(self):
+        return {
+            "downloaded_all": [],
+            "failed": [],
+            "skipped": [],
+            "matching_result": {
+                "hotel": {"paired": [], "matched": [],
+                          "unmatched_invoices": [], "unmatched_folios": []},
+                "ridehailing": {"paired": [], "matched": [],
+                                "unmatched_invoices": [], "unmatched_receipts": []},
+                "other": [],
+                "unparsed": [],
+                "dedup_removed": [],
+            },
+            "date_range": ("2025/01/01", "2025/03/31"),
+            "iteration": 1,
+            "supplemental": False,
+            "aggregation": None,
+        }
+
+    def test_three_distinct_senders_emit_three_cta_lines(self, tmp_path):
+        write_report_md = self._load_write_report_md()
+        ignored = [
+            {"sender_email": "billing@termius.com", "ocr": {"transactionAmount": 120.0}},
+            {"sender_email": "receipts@openrouter.ai", "ocr": {"transactionAmount": 20.0}},
+            {"sender_email": "invoice@anthropic.com", "ocr": {"transactionAmount": 10.0}},
+        ]
+        out = tmp_path / "report.md"
+        write_report_md(str(out), **self._base_args(), ignored_records=ignored)
+        text = out.read_text()
+        assert "📭 已忽略的非报销票据 (3)" in text
+        assert "learned_exclusions.json" in text
+        assert "-from:termius.com" in text
+        assert "-from:openrouter.ai" in text
+        assert "-from:anthropic.com" in text
+        assert "billing@termius.com" in text
+        assert "120" in text
+
+    def test_same_domain_multiple_records_aggregate_to_one_cta_line(self, tmp_path):
+        write_report_md = self._load_write_report_md()
+        ignored = [
+            {"sender_email": "support@termius.com", "ocr": {"transactionAmount": 120.0}},
+            {"sender_email": "billing@termius.com", "ocr": {"transactionAmount": 20.0}},
+        ]
+        out = tmp_path / "report.md"
+        write_report_md(str(out), **self._base_args(), ignored_records=ignored)
+        text = out.read_text()
+        assert text.count("-from:termius.com") == 1
+        assert "已过滤 2 次" in text
+
+    def test_empty_ignored_omits_section(self, tmp_path):
+        write_report_md = self._load_write_report_md()
+        out = tmp_path / "report.md"
+        write_report_md(str(out), **self._base_args(), ignored_records=[])
+        text = out.read_text()
+        assert "已忽略的非报销票据" not in text
+        assert "learned_exclusions" not in text
+
+    def test_none_ignored_records_also_omits_section(self, tmp_path):
+        """Default keyword value is None; existing callers that don't pass
+        ignored_records must continue to work (no report section).
+        """
+        write_report_md = self._load_write_report_md()
+        out = tmp_path / "report.md"
+        write_report_md(str(out), **self._base_args())  # no ignored_records
+        text = out.read_text()
+        assert "已忽略的非报销票据" not in text
+
+    def test_empty_sender_email_excluded_from_cta_only(self, tmp_path):
+        """A record with empty sender_email still appears as "未知发件人"
+        in the sender listing, but is NOT in the CTA aggregation
+        (no domain to propose)."""
+        write_report_md = self._load_write_report_md()
+        ignored = [
+            {"sender_email": "", "ocr": {"transactionAmount": 50.0}},
+            {"sender_email": "billing@termius.com", "ocr": {"transactionAmount": 120.0}},
+        ]
+        out = tmp_path / "report.md"
+        write_report_md(str(out), **self._base_args(), ignored_records=ignored)
+        text = out.read_text()
+        assert "未知发件人" in text
+        assert "-from:termius.com" in text
+        # No empty-domain CTA line
+        assert "-from:\n" not in text
+        assert "-from: " not in text
