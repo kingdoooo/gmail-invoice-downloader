@@ -909,7 +909,10 @@ def _run_postprocess_only(
         d for d in records
         if d.get("valid") and id(d) not in dedup_removed_ids
     ]
-    aggregation = build_aggregation(matching_result, valid_records)
+    # v5.7 Unit 3: same IGNORED split as main().
+    ignored_records = [d for d in valid_records if d.get("category") == "IGNORED"]
+    reimbursable_records = [d for d in valid_records if d.get("category") != "IGNORED"]
+    aggregation = build_aggregation(matching_result, reimbursable_records)
 
     # --- Step 9c: missing.json (computed first so report can render
     #     out_of_range_items[] subsection) ---
@@ -1326,7 +1329,12 @@ def main():
         d for d in downloaded_all
         if d.get("valid") and id(d) not in dedup_removed_ids
     ]
-    aggregation = build_aggregation(matching_result, valid_records)
+    # v5.7 Unit 3: split IGNORED out before aggregation. matching and
+    # build_aggregation only see reimbursable records; ignored_records is
+    # passed separately to the report writer and OpenClaw summary (Unit 4).
+    ignored_records = [d for d in valid_records if d.get("category") == "IGNORED"]
+    reimbursable_records = [d for d in valid_records if d.get("category") != "IGNORED"]
+    aggregation = build_aggregation(matching_result, reimbursable_records)
 
     # --- Step 9c: write missing.json (first, so report can render
     #     out_of_range_items[] subsection) ---

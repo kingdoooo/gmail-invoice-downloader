@@ -2297,6 +2297,15 @@ class TestCategoryConstants:
                 continue
             assert idx < o["UNPARSED"]
 
+    def test_ignored_label_registered(self):
+        from postprocess import CATEGORY_LABELS, CATEGORY_ORDER
+        assert CATEGORY_LABELS.get("IGNORED") == "已忽略"
+        # CATEGORY_ORDER deliberately NOT registering IGNORED: IGNORED
+        # records do not enter aggregation rows, so the default fallback
+        # get(..., 50) is enough. Registering IGNORED would risk
+        # interacting with the UNPARSED=99 invariant.
+        assert "IGNORED" not in CATEGORY_ORDER
+
 
 class TestWorstOf:
     def test_low_worse_than_high(self):
@@ -2622,6 +2631,29 @@ class TestBuildAggregation:
         # build_aggregation's completeness assertion must now pass.
         agg = build_aggregation(matching, valid_records)
         assert len([r for r in agg["rows"] if r.category == "MEAL"]) == 1
+
+    def test_ignored_record_leaking_into_aggregation_raises(self):
+        """Unit 3 guard: main() is the only place that filters out IGNORED
+        records before they reach build_aggregation. If a future refactor
+        silently lets one through, catch it here.
+        """
+        from postprocess import build_aggregation
+        matching_result = {
+            "hotel": {"paired": [], "unmatched_invoices": [], "unmatched_folios": []},
+            "ridehailing": {"paired": [], "unmatched_invoices": [], "unmatched_receipts": []},
+            "other": [{
+                "category": "IGNORED",  # should never reach here
+                "path": "/tmp/bogus.pdf",
+                "transaction_date": "20250101",
+                "vendor_name": "Termius",
+                "ocr": {"transactionAmount": 120.0},
+            }],
+            "unparsed": [],
+            "dedup_removed": [],
+        }
+        valid_records = matching_result["other"]
+        with pytest.raises(AssertionError, match="IGNORED leaked"):
+            build_aggregation(matching_result, valid_records)
 
 
 class TestAggregationConsistency:
@@ -3281,3 +3313,85 @@ class TestSenderEmailPassthrough:
         }
         result = classify_email(msg)
         assert result.get("sender_email") == ""
+
+
+class TestRenameIgnoredBranch:
+    """Unit 3 R2: rename_by_ocr IGNORED branch produces
+    IGNORED_{sender_short}_{base}.pdf. Reuses UNPARSED branch's
+    sanitize + .pdf re-append pattern for safety.
+    """
+
+    def _setup(self, tmp_path, filename="original.pdf"):
+        pdf = tmp_path / filename
+        pdf.write_bytes(b"%PDF-1.4 dummy")
+        return pdf
+
+    def test_termius_renamed_with_domain_label(self, tmp_path):
+        from postprocess import rename_by_ocr
+        pdf = self._setup(tmp_path, "Q9YJOO4I-0001.pdf")
+        record = {
+            "path": str(pdf),
+            "message_id": "msg-termius-001",
+            "sender": "Billing <billing@termius.com>",
+            "sender_email": "billing@termius.com",
+            "merchant": "Termius",
+            "date": "20251112",
+        }
+        analysis = {"category": "IGNORED", "ocr": {"docType": "Invoice"}}
+        rename_by_ocr(record, analysis, str(tmp_path))
+        assert os.path.basename(record["path"]).startswith("IGNORED_termius_")
+        assert record["path"].endswith(".pdf")
+        assert os.path.exists(record["path"])
+
+    def test_empty_sender_email_falls_back_to_unknown(self, tmp_path):
+        from postprocess import rename_by_ocr
+        pdf = self._setup(tmp_path, "mystery.pdf")
+        record = {
+            "path": str(pdf),
+            "message_id": "msg-mystery-001",
+            "sender": "",
+            "sender_email": "",
+            "merchant": "",
+            "date": "20250101",
+        }
+        analysis = {"category": "IGNORED", "ocr": {"docType": "whatever"}}
+        rename_by_ocr(record, analysis, str(tmp_path))
+        assert os.path.basename(record["path"]).startswith("IGNORED_unknown_")
+
+    def test_long_domain_truncated(self, tmp_path):
+        from postprocess import rename_by_ocr
+        pdf = self._setup(tmp_path, "x.pdf")
+        record = {
+            "path": str(pdf),
+            "message_id": "msg-x-001",
+            "sender_email": "ops@reallylongdomainname-with-suffix.co",
+            "merchant": "X",
+            "date": "20250101",
+        }
+        analysis = {"category": "IGNORED", "ocr": {}}
+        rename_by_ocr(record, analysis, str(tmp_path))
+        basename = os.path.basename(record["path"])
+        # Domain label capped at 20 chars (between the two underscores).
+        # Structure: IGNORED_{domain<=20}_{base}
+        parts = basename.split("_", 2)
+        assert parts[0] == "IGNORED"
+        assert len(parts[1]) <= 20
+        assert basename.endswith(".pdf")
+
+    def test_weird_email_sanitized(self, tmp_path):
+        """sender_email with unusual chars must not break os.rename
+        (sanitize_filename handles path separators / NUL / etc.).
+        """
+        from postprocess import rename_by_ocr
+        pdf = self._setup(tmp_path, "z.pdf")
+        record = {
+            "path": str(pdf),
+            "message_id": "msg-z-001",
+            "sender_email": "foo@bar@baz.com",
+            "merchant": "Z",
+            "date": "20250101",
+        }
+        analysis = {"category": "IGNORED", "ocr": {}}
+        rename_by_ocr(record, analysis, str(tmp_path))
+        assert os.path.basename(record["path"]).endswith(".pdf")
+        assert os.path.exists(record["path"])
