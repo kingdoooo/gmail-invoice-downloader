@@ -982,6 +982,25 @@ class TestPostprocessOnlyFlag:
         assert result.returncode != 0
         assert "REMEDIATION:" in result.stderr
 
+    def test_rejects_iteration_with_postprocess_only(self):
+        """--iteration + --postprocess-only → exit non-zero with REMEDIATION."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, "pdfs"))
+            result = subprocess.run(
+                [
+                    "python3", "scripts/download-invoices.py",
+                    "--postprocess-only",
+                    "--iteration", "2",
+                    "--output", tmp,
+                    "--no-llm",
+                ],
+                capture_output=True, text=True,
+            )
+            assert result.returncode != 0
+            assert "REMEDIATION:" in result.stderr
+            assert "--iteration" in result.stderr
+
     def test_existing_pdfs_dir_rewrites_deliverables(self, monkeypatch, tmp_path):
         """pdfs/ with one cached-OCR PDF → report + missing.json regenerate."""
         import shutil

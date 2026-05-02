@@ -901,6 +901,23 @@ def _run_postprocess_only(
     except RuntimeError as e:
         say(f"⚠️  zip skipped: {e}")
 
+    # --- Step 11: OpenClaw chat summary (stdout + run.log). MUST be called
+    #     before log.close() — writer=say dual-writes to the still-open log.
+    #     Mirrors main()'s Step 11 call so auto-probe rescues don't silently
+    #     drop the v5.4 aggregated chat summary.
+    say("")
+    print_openclaw_summary(
+        aggregation,
+        output_dir=output_dir,
+        zip_path=zip_path,
+        csv_path=csv_path,
+        md_path=report_path,
+        log_path=log_path,
+        missing_status=missing_payload["recommended_next_action"],
+        date_range=(run_start_date or "?", run_end_date or "?"),
+        writer=say,
+    )
+
     # --- Exit semantics ---
     if not records:
         print(
@@ -1000,6 +1017,14 @@ def main():
 
     # --- --postprocess-only: skip Gmail (Step 1-5), just redo Step 6-10 ---
     if args.postprocess_only:
+        if args.iteration is not None:
+            print(
+                "\nREMEDIATION: --iteration is not supported with "
+                "--postprocess-only. The iteration number is auto-derived "
+                "from the existing missing.json in --output. Drop --iteration.",
+                file=sys.stderr,
+            )
+            sys.exit(EXIT_UNKNOWN)
         # Propagate --no-llm / --llm-provider to env so the singleton picks it up.
         if args.no_llm:
             os.environ["LLM_PROVIDER"] = "none"
