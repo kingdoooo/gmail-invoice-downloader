@@ -523,6 +523,71 @@ Agent pattern-match stderr `REMEDIATION:` 行自动恢复。
 
 ---
 
+## Presenting Results to the User
+
+Every successful (or partially successful) `print_openclaw_summary` run emits **two stdout sentinels** so the wrapping Agent can deliver the result to the user faithfully across any chat channel (飞书 / Slack / Discord / iMessage / …). The Skill itself is channel-agnostic and does **not** call any IM API directly.
+
+### Sentinel 1 — `CHAT_MESSAGE_START` / `CHAT_MESSAGE_END`
+
+Two bare anchor lines (no colon, no payload) wrap the full human-readable summary on every code path that reaches `print_openclaw_summary`, including the R16b empty-result branch.
+
+```
+CHAT_MESSAGE_START
+📄 发票报销包 — 2025/04/01 → 2025/07/01
+
+✅ 共 63 份凭证，合计 ¥48231.00
+  ...(summary body)...
+
+💡 发现不该报销的（SaaS 订阅 / 个人账单 / 营销邮件）？
+   直接在聊天里告诉我，我会加到 learned_exclusions.json，下次自动排除。
+CHAT_MESSAGE_END
+```
+
+### Sentinel 2 — `CHAT_ATTACHMENTS:`
+
+A single-line JSON declaring deliverable files. Emitted only on the R16a non-empty path, after `CHAT_MESSAGE_END`. Skipped entirely on R16b.
+
+```
+CHAT_ATTACHMENTS: {"files":[{"path":"/abs/.../发票打包_xxx.zip","caption":"报销包"},{"path":"/abs/.../下载报告.md","caption":"报告"},{"path":"/abs/.../发票汇总.csv","caption":"明细"}]}
+```
+
+Schema:
+- `files[]`: ordered list; the array order is the recommended upload order (报销包 → 报告 → 明细).
+- `files[].path`: absolute path on the Skill host.
+- `files[].caption`: short display label. Current values: `"报销包"` / `"报告"` / `"明细"`.
+
+When `zip_output` fails (DEC-6), the zip entry is omitted but MD + CSV are still declared.
+
+### Agent Playbook
+
+After each Skill run:
+
+1. Scan stdout for `CHAT_MESSAGE_START` and `CHAT_MESSAGE_END` lines.
+2. Forward the content **between** those two lines to the user **verbatim** — do not add, remove, translate, summarize, or cherry-pick. Preserve all emoji, Chinese text, blank lines, and the tail invite.
+3. If the stdout also contains `CHAT_ATTACHMENTS: {...}`, parse the JSON and, **in order**, upload each `file.path` as an attachment to the current chat using the channel's native message tool. Use `file.caption` as the attachment label/caption.
+   - 飞书 channel: use the message tool's file-upload capability.
+   - Slack / Discord / WhatsApp / iMessage / other IM: use the equivalent message tool in the Agent's tool set.
+   - If the current channel's message tool does **not** support file attachments (e.g., plain SMS): skip the upload and include the absolute path in the forwarded text instead.
+4. If a single upload fails, **do not abort**. Append one warning line to the same reply:
+   ```
+   ⚠️ {filename} 上传失败（{reason}），请从 {abs_path} 取
+   ```
+   Then continue with the next file.
+5. If `CHAT_MESSAGE_START` / `CHAT_MESSAGE_END` are absent (early-error path), follow the `REMEDIATION:` stderr line as documented in § Exit Codes. Do not attempt attachments.
+
+**Delivery order:** summary text first, attachments after.
+
+**Redundancy is intentional:** the human-readable summary already shows absolute paths (e.g., `📦 报销包（提交这个）: /abs/...`). Those lines remain in the forwarded text so that if an upload fails (channel limit, network, unsupported), the user still has the path.
+
+### Invariants
+
+- Each sentinel appears at most **once** per Skill run.
+- Strict ordering: `CHAT_MESSAGE_START` → `CHAT_MESSAGE_END` → `CHAT_ATTACHMENTS:` (the last two may be absent).
+- `CHAT_ATTACHMENTS:` present ⇒ `CHAT_MESSAGE_START` / `END` both present.
+- Regression-tested in `tests/test_agent_contract.py::TestChatSentinelContract` (R18).
+
+---
+
 ## Handling Unknown Platforms (extensibility)
 
 **新的中国发票平台每月都可能出现**。当 `下载报告.md` 里出现 MANUAL（或 skipped）邮件且确是真发票时，按以下三步操作：
