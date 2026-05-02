@@ -1886,6 +1886,35 @@ class TestMissingJsonStateMachine:
         assert _parse_cli_ymd("2026-04") is None
         assert _parse_cli_ymd("abc") is None
 
+    def test_ridehailing_invoice_before_start_routes_to_out_of_range(self, tmp_path):
+        """v5.5: ride-hailing receipt with transactionDate before run_start
+        → item lands in out_of_range_items (not items). Covers the
+        ridehailing_invoice branch of the routing block."""
+        rh = {
+            "unmatched_receipts": [{
+                "_record": {
+                    "path": "/tmp/old_itinerary.pdf",
+                    "ocr": {
+                        "transactionDate": "2025-03-10",  # before Q2 start
+                        "totalAmount": 88.5,
+                    },
+                },
+            }],
+        }
+        payload = write_missing_json(
+            str(tmp_path / "m.json"),
+            batch_dir=str(tmp_path), iteration=1,
+            matching_result={"hotel": {}, "ridehailing": rh},
+            unparsed_records=[],
+            run_start_date="2026/04/01", run_end_date="2026/07/01",
+        )
+        assert payload["items"] == []
+        assert len(payload["out_of_range_items"]) == 1
+        orr = payload["out_of_range_items"][0]
+        assert orr["type"] == "ridehailing_invoice"  # missing type: invoice
+        assert orr["business_date"] == "2025-03-10"
+        assert orr["reason"] == "business_date_out_of_range"
+
 
 # =============================================================================
 # _compute_convergence_hash properties

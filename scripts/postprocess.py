@@ -51,7 +51,7 @@ from core.matching import (
     match_hotel_pairs,
     match_ride_hailing_pairs,
 )
-from core.validation import validate_ocr_plausibility
+from core.validation import _parse_ocr_date, validate_ocr_plausibility
 
 
 # =============================================================================
@@ -1218,28 +1218,27 @@ def write_summary_csv(path: str, aggregation: Dict[str, Any]) -> int:
 
 MISSING_SCHEMA_VERSION = "1.0"
 DEFAULT_ITERATION_CAP = 3
+REASON_OUT_OF_RANGE = "business_date_out_of_range"
 
 
-def _parse_cli_ymd(s):
+def _parse_cli_ymd(s: str) -> Optional[_dt.date]:
     """Convert CLI-format YYYY/MM/DD or YYYY-MM-DD to a date.
 
     Returns None on empty or unparseable input. Callers default-in items
     that can't be evaluated so we never silently drop them.
     """
-    from core.validation import _parse_ocr_date
     if not s:
         return None
     return _parse_ocr_date(s.replace("/", "-"))
 
 
-def _is_out_of_range(business_date, run_start, run_end):
+def _is_out_of_range(business_date: str, run_start: str, run_end: str) -> bool:
     """True iff business_date is strictly outside [run_start, run_end).
 
     Boundary: start inclusive, end exclusive (matches Gmail `before:` semantics
     used by CLI --end). Default-in on any parse failure — we don't filter
     items we can't evaluate.
     """
-    from core.validation import _parse_ocr_date
     d = _parse_ocr_date(business_date) if business_date else None
     s = _parse_cli_ymd(run_start)
     e = _parse_cli_ymd(run_end)
@@ -1457,7 +1456,7 @@ def write_missing_json(
         if bdate and _is_out_of_range(bdate, run_start_date, run_end_date):
             it2 = dict(it)
             it2["business_date"] = bdate
-            it2["reason"] = "business_date_out_of_range"
+            it2["reason"] = REASON_OUT_OF_RANGE
             out_of_range_items.append(it2)
         else:
             kept_items.append(it)
