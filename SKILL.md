@@ -7,7 +7,7 @@ icon: "🧾"
 
 > **Skill target**: This Skill is invoked by **OpenClaw Agents**, not by end users directly. The non-standard frontmatter keys (`display_name`, `icon`) are OpenClaw runtime extensions — they are **not** part of the Anthropic Skill spec and do nothing in a plain Claude Code / Claude.ai context. The agent-facing contract — exit codes, `REMEDIATION:` stderr lines, `missing.json` schema v1.0 — is documented in § Exit Codes and § Loop Playbook below.
 
-# Gmail Invoice Downloader (v5.6)
+# Gmail Invoice Downloader (v5.7)
 
 搜索 Gmail 中用户指定日期范围内的发票/收据/水单/行程单，用 LLM OCR 提取销售方/日期/金额，按 P1 remark / P2 日期+金额 / P3 同日兜底 三层规则配对酒店水单↔住宿发票、按金额 0.01 容差配对网约车发票↔行程单，输出 `下载报告.md` + `发票汇总.csv` + `发票打包_YYYYMMDD-HHMMSS.zip`。
 

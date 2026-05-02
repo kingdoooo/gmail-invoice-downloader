@@ -2,6 +2,38 @@
 
 本项目的版本声明仅在 `SKILL.md` 第 1 行（`# Gmail Invoice Downloader (vX.Y)`）。下方记录每个版本的发布说明；最新版本在最上面。
 
+## v5.7 — IGNORED 白名单分类 + 非报销票据过滤（双层防御） (2026-05-02)
+
+**动机**：2025Q4 smoke 里 Termius 订阅发票（Stripe 模板 + 英文 docType "Invoice"）被 `is_hotel_folio_by_doctype` 的 "Statement"/"Invoice" 关键字命中，滑入 HOTEL_FOLIO 管道永不匹配，在 `missing.json` 里变成永远修不好的 `hotel_invoice` 缺口；`convergence_hash` 兜底判为 `converged` 是**假收敛**。下一个英文 SaaS 供应商必然再踩同一坑。v5.7 用双层防御从根上切断这条路径。
+
+- **feat(prompts):** `scripts/core/prompts.py` 新增 "Hotel-specific field conditional extraction" 规则（Unit 0）：`arrivalDate / departureDate / checkInDate / checkOutDate / roomNumber` 要求 PDF 原文含明确酒店标签（`Arrival / Departure / Check-in / Check-out / 入住日期 / 抵店日期 / 离店日期 / 退房日期 / 入离日期 / Room No. / 房号` 等），否则保持 null。堵 `is_hotel_folio_by_fields` 3-choose-2 路径被订阅区间（"Nov 12, 2025 – Nov 12, 2026"）、账单周期、开票到期日误触发。
+- **feat(classify):** `scripts/core/classify.py::classify_invoice` 双改（Unit 1）：fallthrough 出口从 `'UNKNOWN'` 改为 `'IGNORED'`；`is_hotel_folio_by_doctype` 命中后 narrow gate 要求 **≥2 of {hotelName, confirmationNo, internalCodes, roomNumber}** — 故意**不含** `balance`（Stripe / Termius "Amount due / Amount paid" 语义冲突）、**不含** `arrivalDate / departureDate`（由 prompt 层约束）。`is_hotel_folio_by_fields` 3-choose-2 强特征路径不动。
+- **feat(download):** `classify_email` 返回 dict 新增 `sender_email`（bare lowercase）；三个 `download_*` 函数构造的 record 传递 `sender` + `sender_email`（Unit 2），供下游 IGNORED 重命名 + CTA 消费。
+- **feat(postprocess):** `rename_by_ocr` 新增第三条 IGNORED 分支（Unit 3）：`IGNORED_{sender_short}_{原名}.pdf`，`sender_short` 从邮件 `from` 域名取（`billing@termius.com` → `termius`，上限 20 字符），空时 `unknown`。`os.rename` OSError 时递归降级到 UNPARSED 分支，保持三路交付自洽。`CATEGORY_LABELS["IGNORED"] = "已忽略"`（`CATEGORY_ORDER` 故意不扩展，避免扰动 UNPARSED=99 不变量）。`main()` 和 `_run_postprocess_only` 在 `valid_records` 构造后切分 `ignored_records` / `reimbursable_records`，matching 和 aggregation 只看可报销记录。`build_aggregation` 入口新增防御性断言防止 IGNORED 泄漏。
+- **feat(report):** 下载报告末尾新增 `## 📭 已忽略的非报销票据 (N)` 节（Unit 4），逐行列出 sender + 金额；附加 `learned_exclusions.json` CTA 代码块，按 domain 聚合 `-from:xxx.com  # 已过滤 N 次`，sorted alphabetically。`print_openclaw_summary` 追加 `📭 已忽略 N 张非报销票据` 行（N=0 省略）。`zip_output` 排除 `IGNORED_*.pdf`（`UNPARSED_*.pdf` 仍然打包）。金额字段经 `float()` coerce，LLM 返回字符串（"120.00"）或 garbage 不会崩溃，不可识别值降级为"金额未识别"。
+- **docs(SKILL):** 新增 `## Lessons Learned § v5.7` 条目（Unit 5）登记双层防御决策 + 明确「不要再做」清单 + 验证工具指引，防止下次 snapshot 同步 `~/reimbursement-helper/backend/agent/utils/` 时无声覆盖本地修改。
+- **chore(dev):** `scripts/dev/replay_classify.py` committed 作为回归工具——扫 `~/.cache/gmail-invoice-downloader/ocr/*.json` 跑旧 / 新 classify 差集，附带 sha256→pdf_path 反查（扫 `~/invoices/**/pdfs/*.pdf`）。差集含合法水单 → 固化到 `tests/fixtures/ocr/legitimate_folios/*.json` + 扩 `TestHotelFolioNarrowGate` 锁定。差集含 SaaS → 预期。
+- **test(suite):** 280 passed（v5.6 为 261，+19 新测试）：`TestPromptContract` / `TestClassifyIgnored` / `TestHotelFolioNarrowGate` / `TestSenderEmailPassthrough` / `TestRenameIgnoredBranch`（含 OSError 降级）/ `TestIgnoredCtaRendering`（含字符串金额崩溃回归）。
+
+### Agent 合约不变
+
+- `missing.json` schema 保持 `"1.0"`；IGNORED 记录**不**进 `items[]`、**不**影响 `convergence_hash` / `status` / `recommended_next_action`。
+- **显式拒绝** 在 `missing.json` 加 `ignored_count` 顶层字段——对无 Agent 消费者的字段做契约迁移属 YAGNI。未来若真有 supervisor agent 需要可观察性，向后兼容的 optional 字段随时可加，非 blocking。
+- `ALLOWED_ITEM_TYPES`、`CATEGORY_LABELS["UNPARSED"]`、`CATEGORY_ORDER["UNPARSED"]==99`、`is_hotel_folio_by_fields` 3-choose-2 路径全部不变。
+- `CHAT_MESSAGE_START` / `CHAT_MESSAGE_END` / `CHAT_ATTACHMENTS:` 三个 sentinel 格式和顺序不变；OpenClaw summary 新增的 `📭 已忽略` 行位于 `CHAT_MESSAGE_START` → `CHAT_MESSAGE_END` 之间，属于用户可见摘要的一部分。
+
+### 升级备注
+
+- **OCR 缓存对 Unit 0 规则是惰性生效的。** 历史 cache 是用 v5.5 prompt 抽取的，可能已把 SaaS 订阅区间写进了 `arrivalDate / departureDate`。这类历史记录在 v5.7 下走 `is_hotel_folio_by_fields` 3-choose-2 路径仍会命中 HOTEL_FOLIO，narrow gate 兜底不到。想让 prompt 规则对历史数据也生效：
+
+      rm -rf ~/.cache/gmail-invoice-downloader/ocr
+
+  不清缓存也安全——v5.7 只会「增量生效」（新 OCR 的 SaaS 会正确落到 IGNORED，历史缓存的 SaaS 可能仍被误判 HOTEL_FOLIO，但 convergence_hash 仍按原来的机制收敛）。
+
+- **上游同步（reimbursement-helper）**：`scripts/core/prompts.py` 的 v5.7 rule 和 `scripts/core/classify.py` 的 fallthrough + narrow gate 是本地 fork。下游 reimbursement-helper 消费经 IGNORED 过滤的 clean 发票，本改动对下游 **pure win**。未来 snapshot sync 把两条改动一起推上游即可。每次 sync 前参考 `scripts/core/__init__.py § Modifications from source` 清单 + 本条 Lessons Learned（SKILL.md line 675+），不要覆盖本地修改。
+
+- **测试固化**：如果 `scripts/dev/replay_classify.py` 在差集里报了合法水单 → IGNORED 的案例，脱敏后固化到 `tests/fixtures/ocr/legitimate_folios/{sample}.json`，扩 `TestHotelFolioNarrowGate` 锁定样本，并回头评估 narrow gate 阈值是否需要放宽。差集全是 SaaS（Termius / Anthropic / OpenRouter / ...）→ 预期效果。
+
 ## v5.6 — Agent-delivered chat attachments + 可信消息原文 (2026-05-02)
 
 - **feat(postprocess):** `print_openclaw_summary` 现在在 stdout 每次产出 `CHAT_MESSAGE_START` / `CHAT_MESSAGE_END` 两条裸锚点行，包住给用户看的完整中文摘要（包括结尾的 "💡 发现不该报销的…" 提示）。Agent 必须原文转发两者之间的内容 — 不增、不删、不翻译、不挑重点。修复 v5.5 前"结尾提示常被 Agent 当装饰文字砍掉"的问题。
