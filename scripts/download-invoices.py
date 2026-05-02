@@ -362,6 +362,10 @@ def download_attachment(client, entry, pdfs_dir, log):
             "message_id": msg_id,
             "attachment_part_id": att.get("attachmentId"),
             "internal_date": entry.get("internal_date"),
+            # v5.7 Unit 2: sender fields consumed by rename_by_ocr IGNORED
+            # branch and the learned_exclusions CTA in write_report_md.
+            "sender": entry.get("sender", ""),
+            "sender_email": entry.get("sender_email", ""),
         }
         (downloaded if ok else failed).append(rec)
     return downloaded, failed
@@ -401,6 +405,9 @@ def download_zip(client, entry, pdfs_dir, log):
                     "message_id": msg_id,
                     "attachment_part_id": f"{zid}:{os.path.basename(pdf)}",
                     "internal_date": entry.get("internal_date"),
+                    # v5.7 Unit 2: sender fields for IGNORED rename + CTA
+                    "sender": entry.get("sender", ""),
+                    "sender_email": entry.get("sender_email", ""),
                 }
                 (downloaded if ok else failed).append(rec)
     return downloaded, failed
@@ -477,6 +484,9 @@ def download_link(entry, pdfs_dir, log, known_paths=None):
         "message_id": entry.get("message_id", ""),
         "attachment_part_id": f"url:{url_key}",
         "internal_date": entry.get("internal_date"),
+        # v5.7 Unit 2: sender fields for IGNORED rename + CTA
+        "sender": entry.get("sender", ""),
+        "sender_email": entry.get("sender_email", ""),
     }
     return ([rec], []) if ok else ([], [{**rec, "reason": info}])
 
@@ -494,6 +504,7 @@ def write_report_md(
     supplemental: bool,
     aggregation=None,
     out_of_range_items=None,   # v5.5 — skipped cross-quarter items
+    ignored_records=None,      # v5.7 Unit 4 — IGNORED records for §已忽略 + CTA
 ):
     """Emit 下载报告.md reflecting v5.3 matching (P1/P2/P3 + ride-hailing + unparsed)
     and supplemental loop context.
@@ -718,6 +729,64 @@ def write_report_md(
             lines.append(f"- `{os.path.basename(rec.get('path',''))}` — {err[:80]}")
         lines.append("")
 
+    # ── v5.7 IGNORED 非报销票据 + learned_exclusions CTA ──
+    if ignored_records:
+        lines.append(f"## 📭 已忽略的非报销票据 ({len(ignored_records)})\n")
+        lines.append(
+            "以下票据被识别为非发票 / 非水单 / 非行程单，已自动过滤，"
+            "不进入 CSV / 打包 zip。文件仍保留在 PDFs 目录下以 `IGNORED_` "
+            "前缀标记，可人工核查。\n"
+        )
+        # Per-record listing: show sender_email + amount.
+        # LLM-returned transactionAmount is unvalidated JSON — it can come
+        # back as a string like "120.00" or garbage. Coerce to float the
+        # same way postprocess._to_float does; unconvertible → "金额未识别"
+        # (same fallback as missing).
+        for rec in ignored_records:
+            sender_email = rec.get("sender_email") or ""
+            label = sender_email if sender_email else "未知发件人"
+            ocr = rec.get("ocr") or {}
+            raw_amount = ocr.get("transactionAmount")
+            try:
+                amount = float(raw_amount) if raw_amount not in (None, "") else None
+            except (TypeError, ValueError):
+                amount = None
+            currency = ocr.get("currency") or ""
+            if amount is not None:
+                prefix = "¥" if not currency or currency == "CNY" else ""
+                suffix = f" {currency}" if currency and currency != "CNY" else ""
+                lines.append(f"- {label}：{prefix}{amount:.2f}{suffix}")
+            else:
+                lines.append(f"- {label}：金额未识别")
+        lines.append("")
+
+        # CTA: aggregate by full email domain, render -from:<domain> lines.
+        # Intentionally different from Unit 3's filename `domain_label` (which
+        # is split-on-first-dot, e.g. "termius" for a friendly tag). Here we
+        # need the whole domain because Gmail's `-from:termius.com` operator
+        # requires a full domain for suffix matching.
+        domain_counts = {}
+        for rec in ignored_records:
+            sender_email = rec.get("sender_email") or ""
+            if "@" not in sender_email:
+                continue
+            domain = sender_email.split("@", 1)[-1]
+            if not domain:
+                continue
+            domain_counts[domain] = domain_counts.get(domain, 0) + 1
+
+        if domain_counts:
+            lines.append(
+                "💡 下次避免 OCR 成本：可把这些 sender 加到 "
+                "`learned_exclusions.json`\n"
+            )
+            lines.append("```")
+            for domain in sorted(domain_counts.keys()):
+                n = domain_counts[domain]
+                lines.append(f"-from:{domain}       # 已过滤 {n} 次")
+            lines.append("```")
+            lines.append("")
+
     # ── v5.5 跨季度边界项（无需补搜） ──
     if out_of_range_items:
         lines.append(
@@ -899,7 +968,10 @@ def _run_postprocess_only(
         d for d in records
         if d.get("valid") and id(d) not in dedup_removed_ids
     ]
-    aggregation = build_aggregation(matching_result, valid_records)
+    # v5.7 Unit 3: same IGNORED split as main().
+    ignored_records = [d for d in valid_records if d.get("category") == "IGNORED"]
+    reimbursable_records = [d for d in valid_records if d.get("category") != "IGNORED"]
+    aggregation = build_aggregation(matching_result, reimbursable_records)
 
     # --- Step 9c: missing.json (computed first so report can render
     #     out_of_range_items[] subsection) ---
@@ -930,6 +1002,7 @@ def _run_postprocess_only(
         supplemental=False,
         aggregation=aggregation,
         out_of_range_items=missing_payload.get("out_of_range_items", []),
+        ignored_records=ignored_records,
     )
     say(f"\n✅ Report:   {report_path}")
 
@@ -965,6 +1038,7 @@ def _run_postprocess_only(
         missing_status=missing_payload["recommended_next_action"],
         date_range=(run_start_date or "?", run_end_date or "?"),
         writer=say,
+        ignored_count=len(ignored_records),
     )
 
     # --- Exit semantics ---
@@ -1316,7 +1390,12 @@ def main():
         d for d in downloaded_all
         if d.get("valid") and id(d) not in dedup_removed_ids
     ]
-    aggregation = build_aggregation(matching_result, valid_records)
+    # v5.7 Unit 3: split IGNORED out before aggregation. matching and
+    # build_aggregation only see reimbursable records; ignored_records is
+    # passed separately to the report writer and OpenClaw summary (Unit 4).
+    ignored_records = [d for d in valid_records if d.get("category") == "IGNORED"]
+    reimbursable_records = [d for d in valid_records if d.get("category") != "IGNORED"]
+    aggregation = build_aggregation(matching_result, reimbursable_records)
 
     # --- Step 9c: write missing.json (first, so report can render
     #     out_of_range_items[] subsection) ---
@@ -1345,6 +1424,7 @@ def main():
         supplemental=args.supplemental,
         aggregation=aggregation,
         out_of_range_items=missing_payload.get("out_of_range_items", []),
+        ignored_records=ignored_records,
     )
     say(f"\n✅ Report:   {report_path}")
 
@@ -1379,6 +1459,7 @@ def main():
         missing_status=missing_payload["recommended_next_action"],
         date_range=(args.start, args.end),
         writer=say,
+        ignored_count=len(ignored_records),
     )
 
     # --- Exit code ---

@@ -19,7 +19,18 @@ Modifications from source:
 - prompts.py (v5.5): folio transactionDate=departureDate rule with null fallback;
   itinerary applicationDate field + rule with null fallback; two new JSON
   sample blocks (folio + itinerary) with common-field reminder captions.
+  (v5.7): added "Hotel-specific field conditional extraction" rule requiring
+  arrivalDate/departureDate/checkInDate/checkOutDate/roomNumber to remain
+  null when no hotel-domain label appears near the value. Prevents SaaS
+  subscription ranges (Nov 12, 2025 – Nov 12, 2026) from triggering
+  is_hotel_folio_by_fields 3-choose-2 on Termius-style invoices.
   PENDING upstream sync to ~/reimbursement-helper/backend/agent/utils/prompts.py.
+  See SKILL.md § Lessons Learned "v5.7 — IGNORED 白名单分类" for rationale.
+- classify.py (v5.7): fallthrough changed from 'UNKNOWN' to 'IGNORED';
+  is_hotel_folio_by_doctype narrow gate tightened to require >=2 of
+  {hotelName, confirmationNo, internalCodes, roomNumber}. Paired with
+  prompts.py v5.7 rule above. See SKILL.md § Lessons Learned
+  "v5.7 — IGNORED 白名单分类" for full decision record.
 
 Sync: this directory is a snapshot and does NOT auto-update when
 reimbursement-helper changes. To check for drift:

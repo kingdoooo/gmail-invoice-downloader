@@ -8,13 +8,25 @@ Classification Priority:
 1. docType special document types + core field detection
 2. invoiceCode 12-digit -> TAXI
 3. serviceType + Chinese invoice detection
-4. UNKNOWN
+4. IGNORED (v5.7 — see MODIFIED block below)
 
 MODIFIED for gmail-invoice-downloader v5.3:
 - Removed COFFEE_KEYWORDS and MEAL_TYPES (non-deterministic random assignment
   was useful for Concur reimbursement, irrelevant for Gmail aggregation use case).
 - Removed is_coffee_vendor() and detect_meal_type() functions.
 - All meal-service invoices now classified as MEAL (no early/mid/late/coffee subtype).
+
+MODIFIED for gmail-invoice-downloader v5.7:
+- Fallthrough default changed from 'UNKNOWN' to 'IGNORED' (whitelist the three
+  reimbursable formats; filter everything else).
+- is_hotel_folio_by_doctype narrow gate tightened: now requires >=2 of
+  {hotelName, confirmationNo, internalCodes, roomNumber}. balance
+  deliberately excluded (SaaS Amount-due conflict); arrival/departure
+  deliberately excluded (covered by fields path + prompt-layer rule).
+- classify_invoice is confidence-blind by design — downstream validation
+  flags from validate_ocr_plausibility are additive and do not feed
+  classification. Any future upstream confidence-aware logic must update
+  scripts/dev/replay_classify.py.
 """
 
 import re
@@ -301,7 +313,7 @@ def classify_invoice(invoice: Dict[str, Any]) -> str:
     1. docType special document types + core field detection
     2. invoiceCode 12-digit -> TAXI
     3. serviceType + Chinese invoice detection
-    4. UNKNOWN
+    4. IGNORED (v5.7: fallthrough renamed from UNKNOWN)
 
     Args:
         invoice: Extracted invoice data
@@ -336,9 +348,24 @@ def classify_invoice(invoice: Dict[str, Any]) -> str:
     if not category and is_hotel_folio_by_fields(invoice):
         category = 'HOTEL_FOLIO'
 
-    # 1.4 Hotel folio by docType keywords
+    # 1.4 Hotel folio by docType keywords — narrowed to >=2 of 4 fields
+    # (v5.7): protects against Termius-style SaaS invoices where docType
+    # hallucinates to "Statement" or "Invoice" but no hotel-domain
+    # structural fields exist. balance deliberately excluded (SaaS
+    # "Amount due" conflict); arrivalDate/departureDate excluded because
+    # the fields path (is_hotel_folio_by_fields, 3-choose-2) already
+    # covers them — re-adding here would widen attack surface against
+    # subscription-range leakage.
     if not category and is_hotel_folio_by_doctype(doc_type):
-        category = 'HOTEL_FOLIO'
+        hotel_field_signals = sum([
+            bool(invoice.get('hotelName')),
+            bool(invoice.get('confirmationNo')),
+            bool(invoice.get('internalCodes')),
+            bool(invoice.get('roomNumber')),
+        ])
+        if hotel_field_signals >= 2:
+            category = 'HOTEL_FOLIO'
+        # else: fall through to IGNORED
 
     # ========== Priority 2: invoiceCode 12-digit -> TAXI ==========
     if not category and invoice_code and len(invoice_code) == 12 and invoice_code.isdigit():
@@ -372,9 +399,13 @@ def classify_invoice(invoice: Dict[str, Any]) -> str:
     if not category and is_tolls_service(service_type, vendor_name):
         category = 'TOLLS'
 
-    # ========== Priority 4: UNKNOWN ==========
+    # ========== Priority 4: IGNORED ==========
+    # (v5.7) fallthrough renamed from UNKNOWN. Non-invoice / non-folio /
+    # non-itinerary documents (SaaS subscriptions, marketing receipts,
+    # bank statements) land here and are filtered out of CSV/zip/
+    # missing.json.items[] in downstream units.
     if not category:
-        category = 'UNKNOWN'
+        category = 'IGNORED'
 
     return category
 

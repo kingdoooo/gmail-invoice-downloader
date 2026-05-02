@@ -672,6 +672,29 @@ python3 scripts/probe-platform.py "https://新平台.com/xxx"
 **检测漂移**：`diff -r scripts/core/ ~/reimbursement-helper/backend/agent/utils/`
 **手动同步**：把变更逐文件 cherry-pick 过来（注意 `classify.py` 已删了 `detect_meal_type` 的随机逻辑，不要覆盖这个删除）。
 
+### 🟢 v5.7 — IGNORED 白名单分类 + 非报销票据过滤（双层防御）
+
+**背景**：2025Q4 smoke 里 Termius 订阅发票（Stripe 模板 + 英文 docType "Invoice"）被 `is_hotel_folio_by_doctype` 的 "Statement"/"Invoice" 类关键字命中，滑入 HOTEL_FOLIO 管道永不匹配，成了 `missing.json` 里永远修不好的 `hotel_invoice` 缺口。Agent loop 通过 `convergence_hash` 兜底判定为 `converged`，但这是**假收敛**——该记录根本不属于可报销范围。下一个英文 SaaS 供应商（Notion / Figma / GitHub / Linear ...）必然再踩同一坑。
+
+**决策**（双层防御）：
+
+1. **Prompt 层**（`scripts/core/prompts.py`）：`arrivalDate / departureDate / checkInDate / checkOutDate / roomNumber` 要求 PDF 原文含明确酒店标签（`Arrival / Departure / Check-in / Check-out / 入住日期 / 抵店日期 / 离店日期 / 退房日期 / 入离日期 / Room No. / 房号` 等），否则保持 null。堵 `is_hotel_folio_by_fields` 3-choose-2 路径被订阅区间（`Nov 12, 2025 – Nov 12, 2026`）、账单周期、开票到期日误触发。
+2. **Classifier 层**（`scripts/core/classify.py::classify_invoice`）：fallthrough 出口从 `UNKNOWN` 改 `IGNORED`；`is_hotel_folio_by_doctype` 命中后 narrow gate 要求 **≥2 of {hotelName, confirmationNo, internalCodes, roomNumber}** — 故意**不含** `balance`（Stripe / Termius "Amount due / Amount paid" 语义冲突）、**不含** `arrivalDate / departureDate`（已由 prompt 层约束）。`is_hotel_folio_by_fields` 3-choose-2 强特征路径不动。
+
+**IGNORED 记录处理**：`IGNORED_{sender_short}_{原名}.pdf` 前缀保留在 output_dir，不进 CSV / zip / `missing.json.items[]`。`sender_short` 从邮件 `from` 头 domain 取（`billing@termius.com` → `termius`，上限 20 字符），空时 `unknown`。报告末尾「已忽略的非报销票据」节追加 `learned_exclusions.json` CTA 块（按 domain 聚合的 `-from:xxx.com  # 已过滤 N 次`），让用户下次 Gmail 搜索直接过滤省 OCR 成本。
+
+**Agent 合约不动**：`missing.json` schema 保持 `"1.0"`；IGNORED 不进 `items[]`、不影响 `convergence_hash` / `status` / `recommended_next_action`。**显式拒绝**在 `missing.json` 加 `ignored_count` 顶层字段——对无 Agent 消费者的字段做契约迁移属 YAGNI。未来若真有 supervisor agent 需要可观察性，向后兼容的 optional 字段随时可加，非 blocking。
+
+**下游影响**：`scripts/core/` 是 `~/reimbursement-helper/backend/agent/utils/` 的快照。本次改动只在本地 fork，下游 reimbursement-helper 在 IGNORED 过滤后只会收到正常发票，prompt 改动对下游 pure win；未来 snapshot sync 把这两条改动（prompts.py rule + classify.py narrow gate + fallthrough）一起推上游即可。
+
+**不要再做**：
+- 回加「docType 含 Invoice/Statement 就是 HOTEL_FOLIO」的宽松逻辑——这是 Termius bug 的根因。
+- 在 narrow gate 加 `balance`——Stripe 类发票 `Amount due` 会误过。
+- 在 narrow gate 加 `arrivalDate / departureDate`——订阅区间会误过。这些应由 prompt 层（Unit 0 rule）防御。
+- 同步 `~/reimbursement-helper/backend/agent/utils/` 时覆盖本地改动。注意 `scripts/core/__init__.py` 的 Modifications from source 清单和本条 Lessons Learned。
+
+**验证工具**：`scripts/dev/replay_classify.py` committed 供 regression check——扫 `~/.cache/gmail-invoice-downloader/ocr/*.json` 跑旧 / 新 classify 差集，附带 sha256→pdf_path 反查。差集含合法水单 → 固化到 `tests/fixtures/ocr/legitimate_folios/*.json` + 扩 `TestHotelFolioNarrowGate` 锁定。差集含 SaaS（Termius / Anthropic / OpenRouter）→ 预期效果，接受。
+
 ### 🔴 12306 支付通知邮件无附件
 
 **现象**：17 封 `12306@rails.com.cn` 的 "网上购票系统-用户支付通知" 被误分类为 TRAIN_TICKET，然后跳到 MANUAL。  

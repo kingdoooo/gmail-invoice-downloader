@@ -73,6 +73,12 @@ CATEGORY_LABELS: Dict[str, str] = {
     "TOLLS":               "通行费",
     "UNKNOWN":             "发票",
     "UNPARSED":            "⚠️ 需人工核查",
+    # v5.7 Unit 3: IGNORED records get IGNORED_{domain}_{base}.pdf
+    # filenames but CATEGORY_ORDER is deliberately NOT extended — IGNORED
+    # records do not enter aggregation rows, so the default get(..., 50)
+    # fallback suffices. Registering CATEGORY_ORDER["IGNORED"] would risk
+    # interacting with TestCategoryConstants's UNPARSED=99 invariant.
+    "IGNORED":             "已忽略",
 }
 
 # HOTEL / RIDEHAILING are v5.3 merged-row categories (invoice+folio collapsed
@@ -374,6 +380,47 @@ def rename_by_ocr(
         if new_path != old_path:
             os.rename(old_path, new_path)
             record["path"] = new_path
+        record["vendor_name"] = record.get("merchant") or "未知"
+        record["transaction_date"] = record.get("date", "")
+        return record
+
+    # v5.7 Unit 3: IGNORED branch — non-reimbursable receipts (SaaS
+    # subscriptions, marketing receipts) get IGNORED_{domain-label}_{base}.pdf
+    # so the user can visually spot them in output_dir without them
+    # polluting CSV/zip/missing.json.items[].
+    if category == "IGNORED":
+        sender_email = record.get("sender_email", "") or ""
+        # Extract domain label: "billing@termius.com" → "termius"
+        # Handle pathological "foo@bar@baz.com" by splitting on first '@'.
+        after_at = sender_email.split("@", 1)[-1] if "@" in sender_email else sender_email
+        domain_label = after_at.split(".")[0] or "unknown"
+        sender_short = sanitize_filename(domain_label, max_len=20) or "unknown"
+
+        base = os.path.basename(old_path)
+        new_name = sanitize_filename(f"IGNORED_{sender_short}_{base}", max_len=200)
+        if not new_name.endswith(".pdf"):
+            new_name += ".pdf"
+        new_path = make_unique_path(pdfs_dir, new_name)
+        if new_path != old_path:
+            try:
+                os.rename(old_path, new_path)
+                record["path"] = new_path
+            except OSError as e:
+                # Hard-disk / permission error: degrade the record through
+                # the UNPARSED pipeline so it still reaches the user in
+                # report / CSV / zip. Delegate to a recursive call with a
+                # synthesized UNPARSED analysis so the file actually gets
+                # the UNPARSED_ visible prefix AND the error text is
+                # written to record["error"] where write_report_md reads
+                # it. Writing to the local `analysis["error"]` would lose
+                # the message because the caller does not read it back.
+                err_text = f"IGNORED rename failed: {e}"
+                record["error"] = err_text
+                return rename_by_ocr(
+                    record,
+                    {"category": "UNPARSED", "error": err_text, "ocr": None},
+                    pdfs_dir,
+                )
         record["vendor_name"] = record.get("merchant") or "未知"
         record["transaction_date"] = record.get("date", "")
         return record
@@ -844,6 +891,15 @@ def build_aggregation(
     Fail-fast on malformed matching_result: missing "hotel"/"ridehailing" keys
     raise KeyError. No defensive defaults — upstream bugs should not be masked.
     """
+    # v5.7 Unit 3: Guard against silent regression — main() splits IGNORED
+    # records out before calling build_aggregation. If any leak through,
+    # aggregation completeness assertions later in the function will fire
+    # from a confusing "accounted == len(valid_records)" mismatch; assert
+    # here with a clearer message.
+    assert not any(
+        r.get("category") == "IGNORED"
+        for r in valid_records
+    ), "IGNORED leaked past main() split — Unit 3 filter broke"
     # DEC-2: scope rounding locally so build_aggregation can be called from
     # any context without mutating Decimal's global rounding mode.
     with localcontext() as ctx:
@@ -1068,6 +1124,7 @@ def print_openclaw_summary(
     missing_status: str,
     date_range: Tuple[str, str],
     writer: Callable[[str], None] = print,
+    ignored_count: int = 0,  # v5.7 Unit 4
 ) -> None:
     """Render a ≤20-line summary to stdout (and optionally run.log via writer).
 
@@ -1169,6 +1226,12 @@ def print_openclaw_summary(
         )
     else:  # ask_user
         writer(f"👉 下一步：需人工核查 — 见 {abs_md} 末尾「⚠️ 需人工核查」区")
+    # 9.5. v5.7 Unit 4: IGNORED count line (only if any were filtered)
+    if ignored_count:
+        writer(
+            f"📭 已忽略 {ignored_count} 张非报销票据"
+            f"（详见下载报告.md §已忽略的非报销票据）"
+        )
     # 10. Blank
     writer("")
     # 11. Deliverables
@@ -1619,6 +1682,13 @@ def zip_output(
                 # PDF whose LLM-extracted vendor happens to begin with 发票打包_
                 # isn't silently dropped from the output.
                 if fn.startswith(ZIP_PREFIX) and fn.endswith(".zip"):
+                    continue
+                # v5.7 Unit 4: IGNORED_ prefix files are non-reimbursable
+                # receipts (SaaS subscriptions, marketing). They stay in
+                # output_dir for the user's audit trail but don't enter
+                # the deliverable zip. UNPARSED_ files still zip (user
+                # needs to see failed-to-parse receipts).
+                if fn.startswith("IGNORED_"):
                     continue
                 # Refuse symlinks so an attacker-placed symlink inside output_dir
                 # can't exfiltrate files from outside the tree via the zip.

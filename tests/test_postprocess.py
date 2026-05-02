@@ -574,6 +574,29 @@ class TestZipAtomic:
         # Partial zip must have been cleaned up
         assert not any(p.name.endswith(".zip.tmp") for p in tmp_path.iterdir())
 
+    def test_ignored_prefix_excluded_from_zip(self, tmp_path):
+        """Unit 4 R3: IGNORED_*.pdf is excluded from the deliverable zip.
+        UNPARSED_*.pdf behavior is preserved (still zipped).
+        """
+        from postprocess import zip_output
+        out = tmp_path / "batch"
+        out.mkdir()
+        pdfs = out / "pdfs"
+        pdfs.mkdir()
+        (pdfs / "20251112_Marriott_水单.pdf").write_bytes(b"%PDF hotel")
+        (pdfs / "IGNORED_termius_Q9YJOO4I.pdf").write_bytes(b"%PDF saas")
+        (pdfs / "UNPARSED_abc_bad.pdf").write_bytes(b"%PDF broken")
+        (out / "下载报告.md").write_text("report")
+        (out / "发票汇总.csv").write_text("csv")
+
+        zp = zip_output(str(out))
+        import zipfile
+        with zipfile.ZipFile(zp) as zf:
+            names = {os.path.basename(n) for n in zf.namelist()}
+        assert "20251112_Marriott_水单.pdf" in names
+        assert "UNPARSED_abc_bad.pdf" in names  # preserved
+        assert "IGNORED_termius_Q9YJOO4I.pdf" not in names  # excluded
+
 
 # =============================================================================
 # #19 HIGH — CSV UTF-8 BOM + None-safe
@@ -2297,6 +2320,15 @@ class TestCategoryConstants:
                 continue
             assert idx < o["UNPARSED"]
 
+    def test_ignored_label_registered(self):
+        from postprocess import CATEGORY_LABELS, CATEGORY_ORDER
+        assert CATEGORY_LABELS.get("IGNORED") == "已忽略"
+        # CATEGORY_ORDER deliberately NOT registering IGNORED: IGNORED
+        # records do not enter aggregation rows, so the default fallback
+        # get(..., 50) is enough. Registering IGNORED would risk
+        # interacting with the UNPARSED=99 invariant.
+        assert "IGNORED" not in CATEGORY_ORDER
+
 
 class TestWorstOf:
     def test_low_worse_than_high(self):
@@ -2622,6 +2654,29 @@ class TestBuildAggregation:
         # build_aggregation's completeness assertion must now pass.
         agg = build_aggregation(matching, valid_records)
         assert len([r for r in agg["rows"] if r.category == "MEAL"]) == 1
+
+    def test_ignored_record_leaking_into_aggregation_raises(self):
+        """Unit 3 guard: main() is the only place that filters out IGNORED
+        records before they reach build_aggregation. If a future refactor
+        silently lets one through, catch it here.
+        """
+        from postprocess import build_aggregation
+        matching_result = {
+            "hotel": {"paired": [], "unmatched_invoices": [], "unmatched_folios": []},
+            "ridehailing": {"paired": [], "unmatched_invoices": [], "unmatched_receipts": []},
+            "other": [{
+                "category": "IGNORED",  # should never reach here
+                "path": "/tmp/bogus.pdf",
+                "transaction_date": "20250101",
+                "vendor_name": "Termius",
+                "ocr": {"transactionAmount": 120.0},
+            }],
+            "unparsed": [],
+            "dedup_removed": [],
+        }
+        valid_records = matching_result["other"]
+        with pytest.raises(AssertionError, match="IGNORED leaked"):
+            build_aggregation(matching_result, valid_records)
 
 
 class TestAggregationConsistency:
@@ -3078,3 +3133,516 @@ class TestPrintOpenClawSummary:
             f"Expected CHAT_MESSAGE_END to be the last line on R16b, "
             f"but lines after it: {lines[end_idx+1:]}"
         )
+
+    # -- Unit 4 R3: ignored_count line (v5.7) -----------------------------
+
+    def test_ignored_count_line_rendered_when_nonzero(self):
+        """Unit 4 R3: print_openclaw_summary emits '📭 已忽略 N 张非报销票据'
+        when ignored_count > 0.
+        """
+        from postprocess import print_openclaw_summary
+        aggregation = {
+            "rows": [],
+            "subtotals": {},
+            "unmatched": {"hotel_invoices": 0, "hotel_folios": 0,
+                          "rh_invoices": 0, "rh_receipts": 0},
+            "voucher_count": 1,
+            "low_conf": {"count": 0, "amount": 0.0},
+            "grand_total": 100.0,
+        }
+        lines = []
+        print_openclaw_summary(
+            aggregation,
+            output_dir="/tmp/out",
+            zip_path="/tmp/out/发票打包.zip",
+            csv_path="/tmp/out/发票汇总.csv",
+            md_path="/tmp/out/下载报告.md",
+            log_path="/tmp/out/run.log",
+            missing_status="stop",
+            date_range=("2025/01/01", "2025/03/31"),
+            writer=lines.append,
+            ignored_count=3,
+        )
+        text = "\n".join(lines)
+        assert "📭 已忽略 3 张非报销票据" in text
+
+    def test_ignored_count_zero_omits_line(self):
+        from postprocess import print_openclaw_summary
+        aggregation = {
+            "rows": [],
+            "subtotals": {},
+            "unmatched": {"hotel_invoices": 0, "hotel_folios": 0,
+                          "rh_invoices": 0, "rh_receipts": 0},
+            "voucher_count": 1,
+            "low_conf": {"count": 0, "amount": 0.0},
+            "grand_total": 100.0,
+        }
+        lines = []
+        print_openclaw_summary(
+            aggregation,
+            output_dir="/tmp/out",
+            zip_path="/tmp/out/发票打包.zip",
+            csv_path="/tmp/out/发票汇总.csv",
+            md_path="/tmp/out/下载报告.md",
+            log_path="/tmp/out/run.log",
+            missing_status="stop",
+            date_range=("2025/01/01", "2025/03/31"),
+            writer=lines.append,
+            ignored_count=0,
+        )
+        text = "\n".join(lines)
+        assert "已忽略" not in text
+
+
+class TestPromptContract:
+    """Unit 0 R5: guard the hotel-field conditional extraction rule in prompts.py.
+
+    The rule prevents LLM from filling arrival/departure/room fields from
+    non-hotel contexts (subscription period, date due, etc.), which would
+    otherwise trigger is_hotel_folio_by_fields 3-choose-2 on SaaS invoices.
+    Keep these substrings synced with the rule text in prompts.py.
+    """
+
+    def test_hotel_conditional_rule_present(self):
+        from core.prompts import get_ocr_prompt
+        prompt = get_ocr_prompt()
+        # Core rule phrasing — do not remove during snapshot sync with
+        # reimbursement-helper without re-reading SKILL.md Lessons Learned v5.7.
+        required_substrings = [
+            "Hotel-specific field conditional extraction",
+            "subscription period",
+            "date due",
+            "Room No.",   # anchor the English positive-trigger half of the rule
+            "入离日期",
+            "房号",
+            "MUST remain `null`",
+        ]
+        for s in required_substrings:
+            assert s in prompt, f"Prompt missing required substring: {s!r}"
+
+
+class TestClassifyIgnored:
+    """Unit 1 R1: classify_invoice fallthrough returns IGNORED.
+
+    Termius-shape SaaS invoices (English docType, no Chinese tax ID,
+    no hotel fields, no service type match) fall through all priority
+    branches and must land on IGNORED, not UNKNOWN.
+    """
+
+    def test_empty_invoice_returns_ignored(self):
+        from core.classify import classify_invoice
+        assert classify_invoice({}) == "IGNORED"
+
+    def test_termius_shape_returns_ignored(self):
+        from core.classify import classify_invoice
+        invoice = {
+            "isChineseInvoice": False,
+            "vendorTaxId": None,
+            "docType": "Invoice",
+            "serviceType": None,
+            "vendorName": "Termius Corporation",
+            # No hotel fields
+        }
+        assert classify_invoice(invoice) == "IGNORED"
+
+    def test_stripe_like_with_balance_but_no_hotel_fields_ignored(self):
+        """The balance field alone must not gate a record into HOTEL_FOLIO.
+
+        Stripe/Termius invoices commonly surface "Amount due/Amount paid",
+        which LLMs may spill into 'balance'. Narrow gate must not trigger
+        on that single signal.
+        """
+        from core.classify import classify_invoice
+        invoice = {
+            "docType": "Statement",
+            "balance": 120.0,
+            "vendorName": "Stripe-like SaaS",
+        }
+        assert classify_invoice(invoice) == "IGNORED"
+
+    def test_chinese_meal_invoice_still_classifies_correctly(self):
+        """Regression: pre-existing MEAL path unaffected by fallthrough rename."""
+        from core.classify import classify_invoice
+        invoice = {
+            "isChineseInvoice": True,
+            "vendorTaxId": "91320214MA1XXXXXX",
+            "serviceType": "*餐饮服务*餐饮费",
+            "docType": "电子发票（普通发票）",
+        }
+        assert classify_invoice(invoice) == "MEAL"
+
+
+class TestHotelFolioNarrowGate:
+    """Unit 1 R1: is_hotel_folio_by_doctype narrow gate requires >=2
+    of {hotelName, confirmationNo, internalCodes, roomNumber}.
+
+    balance is deliberately NOT in the set (SaaS "Amount due" conflict).
+    arrivalDate/departureDate are deliberately NOT in the set
+    (Unit 0 prompt layer handles subscription-range leakage).
+    """
+
+    def test_two_fields_pass_narrow_gate(self):
+        from core.classify import classify_invoice
+        invoice = {
+            "docType": "Statement",
+            "hotelName": "Marriott Shanghai",
+            "confirmationNo": "86690506",
+        }
+        assert classify_invoice(invoice) == "HOTEL_FOLIO"
+
+    def test_one_field_fails_narrow_gate(self):
+        from core.classify import classify_invoice
+        invoice = {
+            "docType": "Statement",
+            "hotelName": "Marriott Shanghai",
+            # Only 1 field — should fall through to IGNORED
+        }
+        assert classify_invoice(invoice) == "IGNORED"
+
+    def test_termius_single_field_hallucination_still_ignored(self):
+        """LLM might fill hotelName with 'Termius Corporation'. Single
+        field is not enough to pass the gate.
+        """
+        from core.classify import classify_invoice
+        invoice = {
+            "docType": "Invoice",
+            "hotelName": "Termius Corporation",
+        }
+        assert classify_invoice(invoice) == "IGNORED"
+
+    def test_guest_folio_with_balance_only_is_ignored(self):
+        """balance is NOT in the narrow-gate field set. A folio that
+        arrives with only balance filled falls through to IGNORED.
+        Previous 5-field proposal (with balance) is deliberately rejected
+        — see brainstorm 2026-05-02 for rationale.
+        """
+        from core.classify import classify_invoice
+        invoice = {
+            "docType": "Guest Folio",
+            "balance": 1260.0,
+        }
+        assert classify_invoice(invoice) == "IGNORED"
+
+    def test_room_and_confirmation_pass(self):
+        from core.classify import classify_invoice
+        invoice = {
+            "docType": "Statement",
+            "roomNumber": "1205",
+            "confirmationNo": "86690506",
+        }
+        assert classify_invoice(invoice) == "HOTEL_FOLIO"
+
+    def test_fields_path_still_works_unchanged(self):
+        """is_hotel_folio_by_fields 3-choose-2 of roomNumber/arrivalDate/
+        departureDate is untouched by Unit 1; legit folios go through this
+        path unaffected.
+
+        Use an empty docType so is_hotel_folio_by_doctype short-circuits
+        at its `if not doc_type` guard and cannot mask a fields-path
+        regression. Previous version used "any" which relied on the
+        keyword set not containing that literal — brittle.
+        """
+        from core.classify import classify_invoice, is_hotel_folio_by_doctype
+        # Make the precondition explicit: doc_type does not match any
+        # is_hotel_folio_by_doctype keyword, so only the fields path can
+        # produce HOTEL_FOLIO here.
+        assert is_hotel_folio_by_doctype("") is False
+        invoice = {
+            "docType": "",
+            "roomNumber": "1205",
+            "arrivalDate": "2025-11-12",
+            "departureDate": "2025-11-13",
+        }
+        assert classify_invoice(invoice) == "HOTEL_FOLIO"
+
+
+class TestSenderEmailPassthrough:
+    """Unit 2 R2 prerequisite: sender_email is exported in classify_email
+    return dict and flows through to download records, so Unit 3's
+    rename_by_ocr can compose IGNORED_{domain-label}_{base}.pdf.
+    """
+
+    def _msg(self, from_value: str) -> dict:
+        return {
+            "id": "msg-001",
+            "payload": {
+                "headers": [
+                    {"name": "From", "value": from_value},
+                    {"name": "Subject", "value": "Invoice for Termius Pro"},
+                ],
+                "body": {"data": ""},
+            },
+            "internalDate": "1731600000000",
+        }
+
+    def test_sender_email_extracted_from_name_bracket_form(self):
+        from invoice_helpers import classify_email
+        result = classify_email(self._msg("Billing <billing@termius.com>"))
+        assert result.get("sender") == "Billing <billing@termius.com>"
+        assert result.get("sender_email") == "billing@termius.com"
+
+    def test_sender_email_extracted_from_bare_address(self):
+        from invoice_helpers import classify_email
+        result = classify_email(self._msg("kent@example.com"))
+        assert result.get("sender_email") == "kent@example.com"
+
+    def test_sender_email_empty_when_sender_missing(self):
+        from invoice_helpers import classify_email
+        msg = {
+            "id": "x",
+            "payload": {"headers": [], "body": {"data": ""}},
+            "internalDate": "1731600000000",
+        }
+        result = classify_email(msg)
+        assert result.get("sender_email") == ""
+
+
+class TestRenameIgnoredBranch:
+    """Unit 3 R2: rename_by_ocr IGNORED branch produces
+    IGNORED_{sender_short}_{base}.pdf. Reuses UNPARSED branch's
+    sanitize + .pdf re-append pattern for safety.
+    """
+
+    def _setup(self, tmp_path, filename="original.pdf"):
+        pdf = tmp_path / filename
+        pdf.write_bytes(b"%PDF-1.4 dummy")
+        return pdf
+
+    def test_termius_renamed_with_domain_label(self, tmp_path):
+        from postprocess import rename_by_ocr
+        pdf = self._setup(tmp_path, "Q9YJOO4I-0001.pdf")
+        record = {
+            "path": str(pdf),
+            "message_id": "msg-termius-001",
+            "sender": "Billing <billing@termius.com>",
+            "sender_email": "billing@termius.com",
+            "merchant": "Termius",
+            "date": "20251112",
+        }
+        analysis = {"category": "IGNORED", "ocr": {"docType": "Invoice"}}
+        rename_by_ocr(record, analysis, str(tmp_path))
+        assert os.path.basename(record["path"]).startswith("IGNORED_termius_")
+        assert record["path"].endswith(".pdf")
+        assert os.path.exists(record["path"])
+
+    def test_empty_sender_email_falls_back_to_unknown(self, tmp_path):
+        from postprocess import rename_by_ocr
+        pdf = self._setup(tmp_path, "mystery.pdf")
+        record = {
+            "path": str(pdf),
+            "message_id": "msg-mystery-001",
+            "sender": "",
+            "sender_email": "",
+            "merchant": "",
+            "date": "20250101",
+        }
+        analysis = {"category": "IGNORED", "ocr": {"docType": "whatever"}}
+        rename_by_ocr(record, analysis, str(tmp_path))
+        assert os.path.basename(record["path"]).startswith("IGNORED_unknown_")
+
+    def test_long_domain_truncated(self, tmp_path):
+        from postprocess import rename_by_ocr
+        pdf = self._setup(tmp_path, "x.pdf")
+        record = {
+            "path": str(pdf),
+            "message_id": "msg-x-001",
+            "sender_email": "ops@reallylongdomainname-with-suffix.co",
+            "merchant": "X",
+            "date": "20250101",
+        }
+        analysis = {"category": "IGNORED", "ocr": {}}
+        rename_by_ocr(record, analysis, str(tmp_path))
+        basename = os.path.basename(record["path"])
+        # Domain label capped at 20 chars (between the two underscores).
+        # Structure: IGNORED_{domain<=20}_{base}
+        parts = basename.split("_", 2)
+        assert parts[0] == "IGNORED"
+        assert len(parts[1]) <= 20
+        assert basename.endswith(".pdf")
+
+    def test_weird_email_sanitized(self, tmp_path):
+        """sender_email with unusual chars must not break os.rename
+        (sanitize_filename handles path separators / NUL / etc.).
+        Pin to the IGNORED branch: without the startswith assertion the
+        test would still pass via the happy path, which also sanitizes
+        and preserves .pdf.
+        """
+        from postprocess import rename_by_ocr
+        pdf = self._setup(tmp_path, "z.pdf")
+        record = {
+            "path": str(pdf),
+            "message_id": "msg-z-001",
+            "sender_email": "foo@bar@baz.com",
+            "merchant": "Z",
+            "date": "20250101",
+        }
+        analysis = {"category": "IGNORED", "ocr": {}}
+        rename_by_ocr(record, analysis, str(tmp_path))
+        basename = os.path.basename(record["path"])
+        assert basename.startswith("IGNORED_")
+        assert basename.endswith(".pdf")
+        assert os.path.exists(record["path"])
+
+    def test_osrename_failure_degrades_to_unparsed_with_error(self, tmp_path, monkeypatch):
+        """OSError on IGNORED rename must degrade to UNPARSED: file gets
+        UNPARSED_ prefix for visual triage, record.error carries the
+        failure message for write_report_md:727 to render.
+        """
+        from postprocess import rename_by_ocr
+        pdf = self._setup(tmp_path, "original.pdf")
+        record = {
+            "path": str(pdf),
+            "message_id": "msg-fail-001",
+            "sender_email": "billing@termius.com",
+            "merchant": "Termius",
+            "date": "20251112",
+        }
+        analysis = {"category": "IGNORED", "ocr": {"docType": "Invoice"}}
+
+        # Fail the first os.rename (the IGNORED rename), let the
+        # recursive UNPARSED rename through.
+        import postprocess as pp
+        calls = {"n": 0}
+        real_rename = pp.os.rename
+
+        def flaky_rename(src, dst):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise OSError("mocked disk failure")
+            real_rename(src, dst)
+
+        monkeypatch.setattr(pp.os, "rename", flaky_rename)
+        rename_by_ocr(record, analysis, str(tmp_path))
+
+        assert record["category"] == "UNPARSED"
+        assert "IGNORED rename failed" in record.get("error", "")
+        basename = os.path.basename(record["path"])
+        # Degrade must physically rename to UNPARSED_ for visual triage
+        assert basename.startswith("UNPARSED_")
+        assert basename.endswith(".pdf")
+        assert os.path.exists(record["path"])
+
+
+class TestIgnoredCtaRendering:
+    """Unit 4 R3: write_report_md renders '📭 已忽略的非报销票据 (N)' section
+    plus a learned_exclusions.json CTA block listing -from:<domain> hints
+    aggregated per sender domain.
+    """
+
+    def _load_write_report_md(self):
+        """Load the function from scripts/download-invoices.py (dash in filename
+        prevents plain import)."""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "download_invoices", "scripts/download-invoices.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod.write_report_md
+
+    def _base_args(self):
+        return {
+            "downloaded_all": [],
+            "failed": [],
+            "skipped": [],
+            "matching_result": {
+                "hotel": {"paired": [], "matched": [],
+                          "unmatched_invoices": [], "unmatched_folios": []},
+                "ridehailing": {"paired": [], "matched": [],
+                                "unmatched_invoices": [], "unmatched_receipts": []},
+                "other": [],
+                "unparsed": [],
+                "dedup_removed": [],
+            },
+            "date_range": ("2025/01/01", "2025/03/31"),
+            "iteration": 1,
+            "supplemental": False,
+            "aggregation": None,
+        }
+
+    def test_three_distinct_senders_emit_three_cta_lines(self, tmp_path):
+        write_report_md = self._load_write_report_md()
+        ignored = [
+            {"sender_email": "billing@termius.com", "ocr": {"transactionAmount": 120.0}},
+            {"sender_email": "receipts@openrouter.ai", "ocr": {"transactionAmount": 20.0}},
+            {"sender_email": "invoice@anthropic.com", "ocr": {"transactionAmount": 10.0}},
+        ]
+        out = tmp_path / "report.md"
+        write_report_md(str(out), **self._base_args(), ignored_records=ignored)
+        text = out.read_text()
+        assert "📭 已忽略的非报销票据 (3)" in text
+        assert "learned_exclusions.json" in text
+        assert "-from:termius.com" in text
+        assert "-from:openrouter.ai" in text
+        assert "-from:anthropic.com" in text
+        assert "billing@termius.com" in text
+        assert "120" in text
+
+    def test_same_domain_multiple_records_aggregate_to_one_cta_line(self, tmp_path):
+        write_report_md = self._load_write_report_md()
+        ignored = [
+            {"sender_email": "support@termius.com", "ocr": {"transactionAmount": 120.0}},
+            {"sender_email": "billing@termius.com", "ocr": {"transactionAmount": 20.0}},
+        ]
+        out = tmp_path / "report.md"
+        write_report_md(str(out), **self._base_args(), ignored_records=ignored)
+        text = out.read_text()
+        assert text.count("-from:termius.com") == 1
+        assert "已过滤 2 次" in text
+
+    def test_empty_ignored_omits_section(self, tmp_path):
+        write_report_md = self._load_write_report_md()
+        out = tmp_path / "report.md"
+        write_report_md(str(out), **self._base_args(), ignored_records=[])
+        text = out.read_text()
+        assert "已忽略的非报销票据" not in text
+        assert "learned_exclusions" not in text
+
+    def test_none_ignored_records_also_omits_section(self, tmp_path):
+        """Default keyword value is None; existing callers that don't pass
+        ignored_records must continue to work (no report section).
+        """
+        write_report_md = self._load_write_report_md()
+        out = tmp_path / "report.md"
+        write_report_md(str(out), **self._base_args())  # no ignored_records
+        text = out.read_text()
+        assert "已忽略的非报销票据" not in text
+
+    def test_empty_sender_email_excluded_from_cta_only(self, tmp_path):
+        """A record with empty sender_email still appears as "未知发件人"
+        in the sender listing, but is NOT in the CTA aggregation
+        (no domain to propose)."""
+        write_report_md = self._load_write_report_md()
+        ignored = [
+            {"sender_email": "", "ocr": {"transactionAmount": 50.0}},
+            {"sender_email": "billing@termius.com", "ocr": {"transactionAmount": 120.0}},
+        ]
+        out = tmp_path / "report.md"
+        write_report_md(str(out), **self._base_args(), ignored_records=ignored)
+        text = out.read_text()
+        assert "未知发件人" in text
+        assert "-from:termius.com" in text
+        # No empty-domain CTA line
+        assert "-from:\n" not in text
+        assert "-from: " not in text
+
+    def test_string_amount_coerced_no_crash(self, tmp_path):
+        """LLM-returned transactionAmount can come back as a string
+        ('120.00') or unconvertible garbage ('unknown'). Report must
+        coerce via float() and degrade to '金额未识别' on failure, never
+        crash with ValueError from f'{str:.2f}'.
+        """
+        write_report_md = self._load_write_report_md()
+        ignored = [
+            {"sender_email": "billing@termius.com",
+             "ocr": {"transactionAmount": "120.00"}},       # numeric string
+            {"sender_email": "receipts@openrouter.ai",
+             "ocr": {"transactionAmount": "unknown"}},      # unconvertible
+        ]
+        out = tmp_path / "report.md"
+        # Must not raise.
+        write_report_md(str(out), **self._base_args(), ignored_records=ignored)
+        text = out.read_text()
+        # Coerced numeric string renders like a real amount:
+        assert "¥120.00" in text
+        # Unconvertible falls through to the "金额未识别" branch:
+        assert "receipts@openrouter.ai：金额未识别" in text
