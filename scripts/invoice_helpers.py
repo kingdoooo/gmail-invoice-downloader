@@ -435,10 +435,21 @@ def extract_xforceplus_pdf_url(body):
 # 返回 JSON 的 data.invoiceSimpleVo.url 即 PDF 直链。
 
 def extract_nuonuo_short_url(body):
-    """Find the 诺诺网 short link in email body. Returns marker for two-step resolution."""
+    """Find the 诺诺网 short link in email body. Returns marker for
+    two-step resolution.
+
+    Excludes API/utility paths (/allow /invoice /scan /sapi /scan-invoice)
+    that share the nnfp.jss.com.cn host but are not redirectable short
+    links. Without this filter, the /allow QR-image URL (which appears
+    before the real short link in Nuonuo's HTML) wins at urls[0] and
+    downstream resolution fails.
+    """
     urls = re.findall(r'https?://nnfp\.jss\.com\.cn/[\w\-=]+', body)
-    # Exclude /scan-invoice/ sub-paths (those are SPA routes, not short links)
-    urls = [u for u in urls if '/scan-invoice/' not in u]
+    EXCLUDED = ('/allow', '/invoice', '/scan', '/sapi', '/scan-invoice')
+    urls = [
+        u for u in urls
+        if not any(p + '/' in u or u.endswith(p) for p in EXCLUDED)
+    ]
     if urls:
         return f"NUONUO_SHORT:{urls[0]}"
     return None
