@@ -493,6 +493,7 @@ def write_report_md(
     iteration: int,
     supplemental: bool,
     aggregation=None,
+    out_of_range_items=None,   # v5.5 — skipped cross-quarter items
 ):
     """Emit 下载报告.md reflecting v5.3 matching (P1/P2/P3 + ride-hailing + unparsed)
     and supplemental loop context.
@@ -717,6 +718,24 @@ def write_report_md(
             lines.append(f"- `{os.path.basename(rec.get('path',''))}` — {err[:80]}")
         lines.append("")
 
+    # ── v5.5 跨季度边界项（无需补搜） ──
+    if out_of_range_items:
+        lines.append(
+            f"## ℹ️ 跨季度边界项（无需补搜，{len(out_of_range_items)} 项）\n"
+        )
+        lines.append(
+            f"以下项目的业务日期不在本批次时间范围"
+            f"（{date_range[0]} ~ {date_range[1]}）内，已跳过自动补搜。"
+            f"如需一并报销，请单独跑对应季度的批次。\n"
+        )
+        for orr in out_of_range_items:
+            needed_for = orr.get("needed_for", "?")
+            bdate = orr.get("business_date", "?")
+            merchant = orr.get("expected_merchant") or ""
+            suffix = f" — {merchant}" if merchant else ""
+            lines.append(f"- `{needed_for}`（业务日期 {bdate}）{suffix}")
+        lines.append("")
+
     # ── 补搜建议 ──
     total_missing = (
         len(hotel.get("unmatched_invoices", []))
@@ -878,6 +897,22 @@ def _run_postprocess_only(
     ]
     aggregation = build_aggregation(matching_result, valid_records)
 
+    # --- Step 9c: missing.json (computed first so report can render
+    #     out_of_range_items[] subsection) ---
+    missing_path = os.path.join(output_dir, "missing.json")
+    prev_hash = _previous_convergence_hash(output_dir)
+    missing_payload = write_missing_json(
+        missing_path,
+        batch_dir=output_dir,
+        iteration=iteration,
+        iteration_cap=iteration_cap,
+        matching_result=matching_result,
+        unparsed_records=matching_result.get("unparsed", []),
+        previous_convergence_hash=prev_hash,
+        run_start_date=run_start_date,    # v5.5 — cross-quarter routing
+        run_end_date=run_end_date,
+    )
+
     # --- Step 9a: 下载报告.md ---
     report_path = os.path.join(output_dir, "下载报告.md")
     write_report_md(
@@ -890,6 +925,7 @@ def _run_postprocess_only(
         iteration=iteration,
         supplemental=False,
         aggregation=aggregation,
+        out_of_range_items=missing_payload.get("out_of_range_items", []),
     )
     say(f"\n✅ Report:   {report_path}")
 
@@ -897,21 +933,6 @@ def _run_postprocess_only(
     csv_path = os.path.join(output_dir, "发票汇总.csv")
     n_csv = write_summary_csv(csv_path, aggregation)
     say(f"✅ CSV:      {csv_path}  ({n_csv} rows)")
-
-    # --- Step 9c: missing.json ---
-    missing_path = os.path.join(output_dir, "missing.json")
-    prev_hash = _previous_convergence_hash(output_dir)
-    # Task 2 leaves run_start_date/run_end_date out of write_missing_json —
-    # Task 4 will add those kwargs and thread them through.
-    missing_payload = write_missing_json(
-        missing_path,
-        batch_dir=output_dir,
-        iteration=iteration,
-        iteration_cap=iteration_cap,
-        matching_result=matching_result,
-        unparsed_records=matching_result.get("unparsed", []),
-        previous_convergence_hash=prev_hash,
-    )
     say(f"✅ missing.json: {missing_path}  "
         f"(status={missing_payload['status']}, "
         f"next={missing_payload['recommended_next_action']}, "
@@ -1292,25 +1313,8 @@ def main():
     ]
     aggregation = build_aggregation(matching_result, valid_records)
 
-    # --- Step 9a: write 下载报告.md ---
-    report_path = os.path.join(output_dir, "下载报告.md")
-    write_report_md(
-        report_path,
-        downloaded_all=downloaded_all, failed=failed, skipped=skipped,
-        matching_result=matching_result,
-        date_range=(args.start, args.end),
-        iteration=iteration,
-        supplemental=args.supplemental,
-        aggregation=aggregation,
-    )
-    say(f"\n✅ Report:   {report_path}")
-
-    # --- Step 9b: write 发票汇总.csv ---
-    csv_path = os.path.join(output_dir, "发票汇总.csv")
-    n_csv = write_summary_csv(csv_path, aggregation)
-    say(f"✅ CSV:      {csv_path}  ({n_csv} rows)")
-
-    # --- Step 9c: write missing.json ---
+    # --- Step 9c: write missing.json (first, so report can render
+    #     out_of_range_items[] subsection) ---
     missing_path = os.path.join(output_dir, "missing.json")
     prev_hash = _previous_convergence_hash(output_dir)
     missing_payload = write_missing_json(
@@ -1321,7 +1325,28 @@ def main():
         matching_result=matching_result,
         unparsed_records=matching_result.get("unparsed", []),
         previous_convergence_hash=prev_hash,
+        run_start_date=args.start,    # v5.5 — cross-quarter routing
+        run_end_date=args.end,
     )
+
+    # --- Step 9a: write 下载报告.md ---
+    report_path = os.path.join(output_dir, "下载报告.md")
+    write_report_md(
+        report_path,
+        downloaded_all=downloaded_all, failed=failed, skipped=skipped,
+        matching_result=matching_result,
+        date_range=(args.start, args.end),
+        iteration=iteration,
+        supplemental=args.supplemental,
+        aggregation=aggregation,
+        out_of_range_items=missing_payload.get("out_of_range_items", []),
+    )
+    say(f"\n✅ Report:   {report_path}")
+
+    # --- Step 9b: write 发票汇总.csv ---
+    csv_path = os.path.join(output_dir, "发票汇总.csv")
+    n_csv = write_summary_csv(csv_path, aggregation)
+    say(f"✅ CSV:      {csv_path}  ({n_csv} rows)")
     say(f"✅ missing.json: {missing_path}  "
         f"(status={missing_payload['status']}, next={missing_payload['recommended_next_action']}, "
         f"items={len(missing_payload['items'])})")

@@ -1111,3 +1111,34 @@ class TestRecordUnknownPlatform:
         )
         assert result.returncode != 0
         assert "REMEDIATION:" in result.stderr
+
+
+class TestOutOfRangeSchema:
+    def test_out_of_range_items_field_coexists_with_v1_required_fields(
+        self, tmp_path,
+    ):
+        """Schema contract: out_of_range_items is additive to v1.0."""
+        from postprocess import write_missing_json
+        hotel = {
+            "unmatched_folios": [{"_record": {"path": "/x.pdf", "ocr": {
+                "hotelName": "H", "departureDate": "2020-01-01", "balance": 1,
+            }}}],
+        }
+        payload = write_missing_json(
+            str(tmp_path / "m.json"),
+            batch_dir=str(tmp_path), iteration=1,
+            matching_result={"hotel": hotel, "ridehailing": {}},
+            unparsed_records=[],
+            run_start_date="2026/04/01", run_end_date="2026/07/01",
+        )
+        for key in (
+            "schema_version", "generated_at", "iteration", "iteration_cap",
+            "status", "recommended_next_action", "convergence_hash",
+            "batch_dir", "items", "out_of_range_items",
+        ):
+            assert key in payload
+        assert payload["schema_version"] == "1.0"
+        assert payload["status"] in (
+            "converged", "needs_retry", "max_iterations_reached",
+            "user_action_required",
+        )

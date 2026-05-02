@@ -1752,6 +1752,140 @@ class TestMissingJsonStateMachine:
         assert payload["status"] == "user_action_required"
         assert payload["recommended_next_action"] == "ask_user"
 
+    # ─── v5.5 — out_of_range_items[] routing ─────────────────────────────
+    def test_folio_before_start_routes_to_out_of_range(self, tmp_path):
+        """v5.5: folio's departureDate before run_start_date → item lands
+        in out_of_range_items[], not items[]. status = converged."""
+        hotel = {
+            "unmatched_folios": [{
+                "_record": {
+                    "path": "/tmp/old_folio.pdf",
+                    "ocr": {
+                        "hotelName": "杭州万豪",
+                        "departureDate": "2025-03-18",  # before Q2 start
+                        "balance": 500,
+                    },
+                },
+            }],
+        }
+        matching = {"hotel": hotel, "ridehailing": {}}
+        mpath = tmp_path / "missing.json"
+        payload = write_missing_json(
+            str(mpath),
+            batch_dir=str(tmp_path),
+            iteration=1,
+            matching_result=matching,
+            unparsed_records=[],
+            run_start_date="2026/04/01",   # Q2 start
+            run_end_date="2026/07/01",     # Q2 end
+        )
+        assert payload["items"] == []
+        assert len(payload["out_of_range_items"]) == 1
+        orr = payload["out_of_range_items"][0]
+        assert orr["type"] == "hotel_invoice"  # missing type: invoice
+        assert orr["business_date"] == "2025-03-18"
+        assert orr["reason"] == "business_date_out_of_range"
+        assert payload["status"] == "converged"
+        assert payload["recommended_next_action"] == "stop"
+
+    def test_in_range_item_stays_in_items(self, tmp_path):
+        hotel = {
+            "unmatched_folios": [{
+                "_record": {"path": "/tmp/x.pdf", "ocr": {
+                    "hotelName": "H", "departureDate": "2026-05-10", "balance": 1,
+                }},
+            }],
+        }
+        payload = write_missing_json(
+            str(tmp_path / "m.json"),
+            batch_dir=str(tmp_path), iteration=1,
+            matching_result={"hotel": hotel, "ridehailing": {}},
+            unparsed_records=[],
+            run_start_date="2026/04/01", run_end_date="2026/07/01",
+        )
+        assert len(payload["items"]) == 1
+        assert payload["out_of_range_items"] == []
+        assert payload["status"] == "needs_retry"
+
+    def test_mixed_batch(self, tmp_path):
+        hotel = {
+            "unmatched_folios": [
+                {"_record": {"path": "/a.pdf", "ocr": {"hotelName": "A",
+                    "departureDate": "2025-03-10", "balance": 1}}},
+                {"_record": {"path": "/b.pdf", "ocr": {"hotelName": "B",
+                    "departureDate": "2026-05-10", "balance": 2}}},
+            ],
+        }
+        payload = write_missing_json(
+            str(tmp_path / "m.json"),
+            batch_dir=str(tmp_path), iteration=1,
+            matching_result={"hotel": hotel, "ridehailing": {}},
+            unparsed_records=[],
+            run_start_date="2026/04/01", run_end_date="2026/07/01",
+        )
+        assert len(payload["items"]) == 1
+        assert len(payload["out_of_range_items"]) == 1
+        assert payload["status"] == "needs_retry"
+
+    def test_missing_business_date_stays_in_items(self, tmp_path):
+        hotel = {
+            "unmatched_folios": [{"_record": {"path": "/x.pdf", "ocr": {
+                "hotelName": "X", "departureDate": None, "balance": 1,
+            }}}],
+        }
+        payload = write_missing_json(
+            str(tmp_path / "m.json"),
+            batch_dir=str(tmp_path), iteration=1,
+            matching_result={"hotel": hotel, "ridehailing": {}},
+            unparsed_records=[],
+            run_start_date="2026/04/01", run_end_date="2026/07/01",
+        )
+        assert len(payload["items"]) == 1
+        assert payload["out_of_range_items"] == []
+
+    def test_extraction_failed_never_filtered(self, tmp_path):
+        payload = write_missing_json(
+            str(tmp_path / "m.json"),
+            batch_dir=str(tmp_path), iteration=1,
+            matching_result={"hotel": {}, "ridehailing": {}},
+            unparsed_records=[{"path": "/x.pdf", "error": "boom"}],
+            run_start_date="2026/04/01", run_end_date="2026/07/01",
+        )
+        assert len(payload["items"]) == 1
+        assert payload["items"][0]["type"] == "extraction_failed"
+        assert payload["out_of_range_items"] == []
+
+    def test_boundary_start_inclusive_end_exclusive(self, tmp_path):
+        hotel = {
+            "unmatched_folios": [
+                {"_record": {"path": "/s.pdf", "ocr": {"hotelName": "S",
+                    "departureDate": "2026-04-01", "balance": 1}}},
+                {"_record": {"path": "/e.pdf", "ocr": {"hotelName": "E",
+                    "departureDate": "2026-07-01", "balance": 2}}},
+            ],
+        }
+        payload = write_missing_json(
+            str(tmp_path / "m.json"),
+            batch_dir=str(tmp_path), iteration=1,
+            matching_result={"hotel": hotel, "ridehailing": {}},
+            unparsed_records=[],
+            run_start_date="2026/04/01", run_end_date="2026/07/01",
+        )
+        # start inclusive — April 1 stays in items
+        assert sum(1 for it in payload["items"] if "s.pdf" in it["needed_for"]) == 1
+        # end exclusive — July 1 is out of range
+        assert sum(1 for it in payload["out_of_range_items"]
+                   if "e.pdf" in it["needed_for"]) == 1
+
+    def test_parse_cli_ymd_handles_gmail_format(self):
+        from postprocess import _parse_cli_ymd
+        import datetime
+        assert _parse_cli_ymd("2026/04/01") == datetime.date(2026, 4, 1)
+        assert _parse_cli_ymd("2026-04-01") == datetime.date(2026, 4, 1)
+        assert _parse_cli_ymd("") is None
+        assert _parse_cli_ymd("2026-04") is None
+        assert _parse_cli_ymd("abc") is None
+
 
 # =============================================================================
 # _compute_convergence_hash properties

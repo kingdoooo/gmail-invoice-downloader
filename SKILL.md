@@ -411,9 +411,22 @@ python3 scripts/download-invoices.py \
         "priority": "high"
       }
     }
+  ],
+  "out_of_range_items": [                        // v5.5 — additive to v1.0
+    {
+      "type": "hotel_invoice",
+      "needed_for": "20250318_杭州万豪_水单.pdf",
+      "business_date": "2025-03-18",
+      "reason": "business_date_out_of_range",
+      "expected_merchant": "杭州万豪",
+      "hint": "水单退房日早于本批次 --start，已跳过自动补搜",
+      "search_suggestion": null
+    }
   ]
 }
 ```
+
+`out_of_range_items` 不参与 `convergence_hash` / `status` 计算，也不触发 `run_supplemental`。
 
 ### Loop 决策
 

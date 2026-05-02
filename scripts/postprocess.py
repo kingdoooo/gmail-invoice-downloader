@@ -1220,6 +1220,34 @@ MISSING_SCHEMA_VERSION = "1.0"
 DEFAULT_ITERATION_CAP = 3
 
 
+def _parse_cli_ymd(s):
+    """Convert CLI-format YYYY/MM/DD or YYYY-MM-DD to a date.
+
+    Returns None on empty or unparseable input. Callers default-in items
+    that can't be evaluated so we never silently drop them.
+    """
+    from core.validation import _parse_ocr_date
+    if not s:
+        return None
+    return _parse_ocr_date(s.replace("/", "-"))
+
+
+def _is_out_of_range(business_date, run_start, run_end):
+    """True iff business_date is strictly outside [run_start, run_end).
+
+    Boundary: start inclusive, end exclusive (matches Gmail `before:` semantics
+    used by CLI --end). Default-in on any parse failure — we don't filter
+    items we can't evaluate.
+    """
+    from core.validation import _parse_ocr_date
+    d = _parse_ocr_date(business_date) if business_date else None
+    s = _parse_cli_ymd(run_start)
+    e = _parse_cli_ymd(run_end)
+    if d is None or s is None or e is None:
+        return False
+    return d < s or d >= e
+
+
 def _search_suggestion_for_item(
     kind: str,
     needed_for: Dict[str, Any],
@@ -1324,6 +1352,8 @@ def write_missing_json(
     matching_result: Dict[str, Any],
     unparsed_records: List[Dict[str, Any]],
     previous_convergence_hash: Optional[str] = None,
+    run_start_date: str = "",     # v5.5 — CLI-format YYYY/MM/DD
+    run_end_date: str = "",       # v5.5 — CLI-format YYYY/MM/DD
 ) -> Dict[str, Any]:
     """Build missing.json from do_all_matching output and write to disk.
 
@@ -1335,6 +1365,10 @@ def write_missing_json(
       - recommended_next_action: run_supplemental | stop | ask_user
       - convergence_hash: sha256(sorted needed_for keys)
       - items: list of missing artifacts with per-item search suggestions
+      - out_of_range_items: additive v5.5 — items whose OCR business_date falls
+        outside [run_start_date, run_end_date). Not counted toward status or
+        convergence_hash — Agents skip these rather than chase into adjacent
+        quarters.
     """
     items: List[Dict[str, Any]] = []
 
@@ -1403,6 +1437,32 @@ def write_missing_json(
             "search_suggestion": None,
         })
 
+    # v5.5 — route cross-quarter items to out_of_range_items[]
+    # Business date by type (item.type describes what's MISSING; the
+    # business date comes from what we HAVE):
+    out_of_range_items: List[Dict[str, Any]] = []
+    kept_items: List[Dict[str, Any]] = []
+    for it in items:
+        if it["type"] in (
+            "hotel_folio",
+            "hotel_invoice",
+            "ridehailing_receipt",
+            "ridehailing_invoice",
+        ):
+            bdate = it.get("expected_date")
+        else:
+            # extraction_failed / unknown_platform / unknown types never filtered
+            bdate = None
+
+        if bdate and _is_out_of_range(bdate, run_start_date, run_end_date):
+            it2 = dict(it)
+            it2["business_date"] = bdate
+            it2["reason"] = "business_date_out_of_range"
+            out_of_range_items.append(it2)
+        else:
+            kept_items.append(it)
+    items = kept_items
+
     # Convergence + status
     convergence_hash = _compute_convergence_hash(items)
     has_converged_vs_previous = (
@@ -1439,6 +1499,7 @@ def write_missing_json(
         "convergence_hash": convergence_hash,
         "batch_dir": batch_dir,
         "items": items,
+        "out_of_range_items": out_of_range_items,   # v5.5 addition
     }
 
     # Atomic write
