@@ -41,6 +41,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from core.classify import classify_invoice
 from core.llm_client import (
+    LLMConfigError,
     LLMDisabledError,
     LLMError,
     get_client,
@@ -155,7 +156,7 @@ from invoice_helpers import make_unique_path  # noqa: E402
 def analyze_pdf_batch(
     records: List[Dict[str, Any]],
     *,
-    max_workers: int = 2,
+    max_workers: Optional[int] = None,
     use_llm: bool = True,
     logger: Optional[Any] = None,
 ) -> Dict[str, Dict[str, Any]]:
@@ -164,14 +165,38 @@ def analyze_pdf_batch(
     Args:
         records: list of download records with `path`, `valid`, optional
                  `internal_date` (email internalDate ms).
-        max_workers: ThreadPoolExecutor parallelism. Default 2 is safe for
-                     Anthropic tier-1. Override with env LLM_OCR_CONCURRENCY.
+        max_workers: ThreadPoolExecutor parallelism.
+                     If None: reads env LLM_OCR_CONCURRENCY, defaults to 5.
+                     Explicit kwarg > env var > default.
+                     Bedrock (default provider) has generous concurrency
+                     budgets; 5 is safe. Anthropic tier-1 users should set
+                     LLM_OCR_CONCURRENCY=2 (or a smaller number).
+                     Invalid env var raises LLMConfigError (exit 3) rather
+                     than silently defaulting.
         use_llm: pass False to skip LLM entirely (--no-llm mode).
         logger: optional object with .write or .print for progress output.
 
     Returns:
         {record_path: {ocr, category, city, error, used_fallback}}
     """
+    # v5.5: resolve max_workers from explicit kwarg > env var > default.
+    # Fail fast on invalid env — silent fallback would mask a config typo
+    # (e.g. LLM_OCR_CONCURRENCY=10x) and quietly run at default concurrency.
+    if max_workers is None:
+        env = os.environ.get("LLM_OCR_CONCURRENCY", "").strip()
+        if env:
+            try:
+                parsed = int(env)
+                if parsed < 1:
+                    raise ValueError(f"must be >= 1, got {parsed}")
+                max_workers = parsed
+            except ValueError as e:
+                raise LLMConfigError(
+                    f"invalid LLM_OCR_CONCURRENCY={env!r}: {e}"
+                ) from None
+        else:
+            max_workers = 5
+
     # Construct client once (singleton will cache). Let auth / config errors
     # propagate so the caller can map them to EXIT_LLM_CONFIG with a clear
     # REMEDIATION line. Silent degradation to UNPARSED on auth failure was

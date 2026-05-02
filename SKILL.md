@@ -107,6 +107,13 @@ export OPENAI_MODEL=claude-sonnet-4-6   # 端点支持的模型名
 
 **数据主权说明**：PDF 会以 base64 传给云端 LLM。发票含身份证号 / 手机号 / 房号 / 行程时间等敏感信息。本地模型支持未计划（未来可能通过 `LLM_PROVIDER=ollama` 扩展）。
 
+### LLM OCR 并发控制
+
+- 默认 5 并发（Bedrock 默认配额 + 大多数 OpenAI/Anthropic tier-2+ 足够）
+- Anthropic tier-1：`export LLM_OCR_CONCURRENCY=2`
+- 自建代理/低带宽：按需调低
+- 非正整数 → doctor 标红 + `analyze_pdf_batch` 抛 `LLMConfigError`（exit 3）
+
 ### OCR 结果缓存
 
 `~/.cache/gmail-invoice-downloader/ocr/` 按 PDF 的 SHA-256 缓存。同一个 PDF 重跑 = 0 LLM 调用。LRU 10000 条。

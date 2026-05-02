@@ -950,6 +950,25 @@ class TestDoctorLLMMatrix:
         ok, msg = self._check()
         assert not ok and "Unknown LLM_PROVIDER" in msg
 
+    def test_doctor_concurrency_env(self, monkeypatch):
+        from doctor import _check_ocr_concurrency   # v5.5 new function
+        monkeypatch.delenv("LLM_OCR_CONCURRENCY", raising=False)
+        ok, msg = _check_ocr_concurrency()
+        assert ok is True and "default=5" in msg
+
+        monkeypatch.setenv("LLM_OCR_CONCURRENCY", "3")
+        ok, msg = _check_ocr_concurrency()
+        assert ok is True and "LLM_OCR_CONCURRENCY=3" in msg
+
+        monkeypatch.setenv("LLM_OCR_CONCURRENCY", "abc")
+        ok, msg = _check_ocr_concurrency()
+        assert ok is False and "REMEDIATION" in msg
+
+        monkeypatch.setenv("LLM_OCR_CONCURRENCY", "50")
+        ok, msg = _check_ocr_concurrency()
+        # Warn is returned as ok=True with warn text for this repo's convention
+        assert "unusually high" in msg or "throttle" in msg
+
 
 # =============================================================================
 # Matching: P1 (remark) / P2 (date+amount) / P3 (v5.2 date-only fallback)
@@ -2103,6 +2122,74 @@ class TestAnalyzePdfBatchAuthPropagation:
         # Must raise, not return results with all-UNPARSED
         with pytest.raises(LLMAuthError):
             analyze_pdf_batch(records, use_llm=True)
+
+
+class TestConcurrencyEnvVar:
+    """v5.5: LLM_OCR_CONCURRENCY honored; default bumped 2 → 5.
+
+    `postprocess.py` imports ThreadPoolExecutor via `from concurrent.futures
+    import ThreadPoolExecutor`, so the monkeypatch must target the module-
+    level binding `postprocess.ThreadPoolExecutor`, not the source class.
+    """
+
+    def _spy_executor_cls(self, captured):
+        import postprocess as _pp
+        real = _pp.ThreadPoolExecutor
+
+        class SpyExecutor(real):
+            def __init__(self, max_workers=None, *a, **k):
+                captured["max_workers"] = max_workers
+                super().__init__(max_workers=max_workers, *a, **k)
+
+        return SpyExecutor
+
+    def test_default_is_5_when_unset(self, monkeypatch):
+        monkeypatch.delenv("LLM_OCR_CONCURRENCY", raising=False)
+        captured: Dict[str, Any] = {}
+        monkeypatch.setattr(
+            "postprocess.ThreadPoolExecutor", self._spy_executor_cls(captured)
+        )
+        from postprocess import analyze_pdf_batch
+        analyze_pdf_batch([], use_llm=False)
+        assert captured.get("max_workers") == 5
+
+    def test_env_var_honored(self, monkeypatch):
+        monkeypatch.setenv("LLM_OCR_CONCURRENCY", "3")
+        captured: Dict[str, Any] = {}
+        monkeypatch.setattr(
+            "postprocess.ThreadPoolExecutor", self._spy_executor_cls(captured)
+        )
+        from postprocess import analyze_pdf_batch
+        analyze_pdf_batch([], use_llm=False)
+        assert captured.get("max_workers") == 3
+
+    def test_explicit_kwarg_beats_env(self, monkeypatch):
+        monkeypatch.setenv("LLM_OCR_CONCURRENCY", "10")
+        captured: Dict[str, Any] = {}
+        monkeypatch.setattr(
+            "postprocess.ThreadPoolExecutor", self._spy_executor_cls(captured)
+        )
+        from postprocess import analyze_pdf_batch
+        analyze_pdf_batch([], use_llm=False, max_workers=4)
+        assert captured.get("max_workers") == 4
+
+    def test_invalid_env_raises_config_error(self, monkeypatch):
+        from postprocess import analyze_pdf_batch
+        for bad in ("abc", "-1", "0"):
+            monkeypatch.setenv("LLM_OCR_CONCURRENCY", bad)
+            with pytest.raises(LLMConfigError):
+                analyze_pdf_batch([], use_llm=False)
+
+    def test_empty_env_is_unset(self, monkeypatch):
+        """Empty string should behave like the env var being unset."""
+        monkeypatch.setenv("LLM_OCR_CONCURRENCY", "")
+        captured: Dict[str, Any] = {}
+        monkeypatch.setattr(
+            "postprocess.ThreadPoolExecutor", self._spy_executor_cls(captured)
+        )
+        from postprocess import analyze_pdf_batch
+        analyze_pdf_batch([], use_llm=False)
+        assert captured.get("max_workers") == 5
 
 
 # =============================================================================

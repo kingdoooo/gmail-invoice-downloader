@@ -155,6 +155,34 @@ def _check_llm_config() -> tuple[bool, str]:
     )
 
 
+def _check_ocr_concurrency() -> tuple[bool, str]:
+    """Validate LLM_OCR_CONCURRENCY env var (v5.5 addition).
+
+    Returns (ok, message). Invalid values fail fast — same policy as
+    analyze_pdf_batch, which raises LLMConfigError on invalid env.
+    """
+    env = os.environ.get("LLM_OCR_CONCURRENCY", "").strip()
+    if not env:
+        return (True, "LLM_OCR_CONCURRENCY unset (using default=5)")
+    try:
+        n = int(env)
+        if n < 1:
+            raise ValueError(f"must be >= 1, got {n}")
+    except ValueError as e:
+        return (
+            False,
+            f"LLM_OCR_CONCURRENCY={env!r} invalid ({e}). "
+            f"REMEDIATION: set to a positive integer or unset it."
+        )
+    if n > 20:
+        return (
+            True,
+            f"LLM_OCR_CONCURRENCY={n} (warn: unusually high; most providers "
+            f"throttle above 10)"
+        )
+    return (True, f"LLM_OCR_CONCURRENCY={n}")
+
+
 def _check_ocr_cache() -> tuple[bool, str]:
     try:
         OCR_CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -187,6 +215,7 @@ CHECKS = [
     ("pdftotext installed", _check_pdftotext),
     ("Gmail OAuth files", _check_gmail_credentials),
     ("LLM provider config", _check_llm_config),
+    ("OCR concurrency", _check_ocr_concurrency),
     ("OCR cache writeable", _check_ocr_cache),
     ("scripts/core/ package", _check_scripts_core),
 ]
