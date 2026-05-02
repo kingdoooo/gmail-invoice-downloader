@@ -83,6 +83,8 @@ def get_ocr_prompt() -> str:
 理由：退房日是住宿服务完成的日期，与发票开票日对齐，是 P2 匹配依赖的字段。
 不要取 arrivalDate、check-in、room charge date 等其他日期。
 
+若 departureDate 无法识别（水单残缺或信息缺失），则 transactionDate 填 null，不要猜测或用 arrivalDate 代替。
+
 ## 网约车发票专用字段
 
 | 字段名 | 类型 | 说明 |
@@ -103,6 +105,8 @@ def get_ocr_prompt() -> str:
 将 applicationDate 同时填入 transactionDate。
 理由：申请日期是行程单的结算时间点，与对应发票的开票日期最接近。
 不要取各笔行程的上车时间（不同行程日期不同），也不要取行程起止范围的任一端点。
+
+若 applicationDate 无法识别，applicationDate 和 transactionDate 都填 null，不要用行程起止范围猜测。
 
 行程单表格示例：
 ```
@@ -158,7 +162,7 @@ def get_ocr_prompt() -> str:
 }
 ```
 
-**酒店水单示例**（注意 transactionDate == departureDate）：
+**酒店水单示例**（注意 transactionDate == departureDate；仍需按通用字段表提取 transactionAmount、vendorName、vendorTaxId 等）：
 
 ```json
 {
@@ -172,7 +176,7 @@ def get_ocr_prompt() -> str:
 }
 ```
 
-**网约车行程单示例**（注意 transactionDate == applicationDate）：
+**网约车行程单示例**（注意 transactionDate == applicationDate；仍需按通用字段表提取 transactionAmount、vendorName、docType 等）：
 
 ```json
 {
