@@ -7,6 +7,8 @@ These tests lock the runtime contract the Skill exposes to OpenClaw Agents:
 - R10 convergence_hash reproducibility + status-machine transitions
 - R11 missing.json schema v1.0 enum values
 - R12 zip manifest allowlist + self-exclusion
+- R18 CHAT_MESSAGE_START / CHAT_MESSAGE_END / CHAT_ATTACHMENTS: sentinels
+      (see SKILL.md § Presenting Results to the User)
 
 Unlike tests/test_postprocess.py (component-level unit tests), these drive
 the pipeline from the CLI boundary inward.  They mock the network
@@ -1146,4 +1148,217 @@ class TestOutOfRangeSchema:
         assert payload["status"] in (
             "converged", "needs_retry", "max_iterations_reached",
             "user_action_required",
+        )
+
+
+# =============================================================================
+# R18 — CHAT_MESSAGE_START / END + CHAT_ATTACHMENTS: sentinel contract
+# =============================================================================
+
+class TestChatSentinelContract:
+    """Agent-facing contract: print_openclaw_summary emits:
+      - Exactly one CHAT_MESSAGE_START anchor (bare, no colon)
+      - Exactly one CHAT_MESSAGE_END anchor (bare, no colon)
+      - At most one CHAT_ATTACHMENTS: JSON line (R16a only)
+      - Strict ordering: START < END < ATTACHMENTS (when all present)
+      - CHAT_ATTACHMENTS: JSON schema: {"files":[{"path","caption"}, ...]}
+    See SKILL.md § Presenting Results to the User.
+    """
+
+    @staticmethod
+    def _run_and_capture(populate: bool, zip_ok: bool = True):
+        """Drive print_openclaw_summary with a sink writer and return lines."""
+        import sys as _sys
+        import os as _os
+        _sys.path.insert(
+            0, _os.path.join(_os.path.dirname(__file__), "..", "scripts")
+        )
+        from postprocess import (  # type: ignore
+            print_openclaw_summary,
+            build_aggregation,
+            do_all_matching,
+        )
+
+        if populate:
+            recs = [
+                {
+                    "path": "/out/pdfs/m.pdf",
+                    "valid": True,
+                    "category": "MEAL",
+                    "ocr": {
+                        "transactionDate": "2026-04-01",
+                        "transactionAmount": 100.0,
+                        "vendorName": "V1",
+                    },
+                },
+            ]
+        else:
+            recs = []
+        matching = do_all_matching(recs)
+        agg = build_aggregation(matching, recs)
+
+        sink = []
+        print_openclaw_summary(
+            aggregation=agg,
+            output_dir="/tmp/contract_test",
+            zip_path="/tmp/contract_test/p.zip" if zip_ok else None,
+            csv_path="/tmp/contract_test/发票汇总.csv",
+            md_path="/tmp/contract_test/下载报告.md",
+            log_path="/tmp/contract_test/run.log",
+            missing_status="stop",
+            date_range=("2026/04/01", "2026/04/30"),
+            writer=lambda s: sink.append(s),
+        )
+        return sink
+
+    def test_anchors_exactly_once_on_non_empty_path(self):
+        lines = self._run_and_capture(populate=True)
+        assert lines.count("CHAT_MESSAGE_START") == 1
+        assert lines.count("CHAT_MESSAGE_END") == 1
+
+    def test_anchors_exactly_once_on_empty_path(self):
+        lines = self._run_and_capture(populate=False)
+        assert lines.count("CHAT_MESSAGE_START") == 1
+        assert lines.count("CHAT_MESSAGE_END") == 1
+
+    def test_anchors_are_bare_no_colon_no_payload(self):
+        """Anchors must be literal strings, not prefix:payload."""
+        lines = self._run_and_capture(populate=True)
+        start_lines = [ln for ln in lines if "CHAT_MESSAGE_START" in ln]
+        end_lines = [ln for ln in lines if "CHAT_MESSAGE_END" in ln]
+        assert start_lines == ["CHAT_MESSAGE_START"]
+        assert end_lines == ["CHAT_MESSAGE_END"]
+
+    def test_attachments_at_most_once(self):
+        lines = self._run_and_capture(populate=True)
+        prefix_hits = [
+            ln for ln in lines if ln.startswith("CHAT_ATTACHMENTS: ")
+        ]
+        assert len(prefix_hits) == 1
+
+    def test_attachments_absent_on_empty_path(self):
+        lines = self._run_and_capture(populate=False)
+        prefix_hits = [
+            ln for ln in lines if ln.startswith("CHAT_ATTACHMENTS: ")
+        ]
+        assert prefix_hits == []
+
+    def test_ordering_start_lt_end_lt_attachments(self):
+        lines = self._run_and_capture(populate=True)
+        start_idx = lines.index("CHAT_MESSAGE_START")
+        end_idx = lines.index("CHAT_MESSAGE_END")
+        att_idx = next(
+            i for i, ln in enumerate(lines)
+            if ln.startswith("CHAT_ATTACHMENTS: ")
+        )
+        assert start_idx < end_idx < att_idx
+
+    def test_attachments_json_schema(self):
+        import json as _json
+        lines = self._run_and_capture(populate=True)
+        att = next(
+            ln for ln in lines if ln.startswith("CHAT_ATTACHMENTS: ")
+        )
+        payload = _json.loads(att[len("CHAT_ATTACHMENTS: "):])
+        assert set(payload.keys()) == {"files"}
+        assert isinstance(payload["files"], list)
+        assert len(payload["files"]) >= 1
+        for entry in payload["files"]:
+            assert set(entry.keys()) == {"path", "caption"}
+            assert isinstance(entry["path"], str)
+            assert entry["path"].startswith("/")  # absolute
+            assert entry["caption"] in {"报销包", "报告", "明细"}
+
+    def test_attachments_omits_zip_on_zip_failure(self):
+        lines = self._run_and_capture(populate=True, zip_ok=False)
+        import json as _json
+        att = next(
+            ln for ln in lines if ln.startswith("CHAT_ATTACHMENTS: ")
+        )
+        payload = _json.loads(att[len("CHAT_ATTACHMENTS: "):])
+        captions = [f["caption"] for f in payload["files"]]
+        assert "报销包" not in captions
+        assert captions == ["报告", "明细"]
+
+    def test_attachments_payload_is_single_line(self):
+        """Agent line-based parsing requires no literal newline inside the JSON payload."""
+        lines = self._run_and_capture(populate=True)
+        att = next(
+            ln for ln in lines if ln.startswith("CHAT_ATTACHMENTS: ")
+        )
+        assert "\n" not in att, (
+            "CHAT_ATTACHMENTS payload must be a single line; "
+            "any newline breaks Agent line-based parsing."
+        )
+
+    def test_attachments_paths_are_not_shell_quoted(self):
+        """Paths with spaces stay as raw absolute paths — no shlex.quote.
+
+        The Agent uploads `file.path` directly via the channel's native
+        message tool, which accepts raw paths. Applying shlex quoting
+        (as done elsewhere in the CLI) would break that.
+        """
+        import sys as _sys
+        import os as _os
+        _sys.path.insert(
+            0, _os.path.join(_os.path.dirname(__file__), "..", "scripts")
+        )
+        from postprocess import (  # type: ignore
+            print_openclaw_summary, build_aggregation, do_all_matching,
+        )
+
+        recs = [{
+            "path": "/out/pdfs/m.pdf",
+            "valid": True,
+            "category": "MEAL",
+            "ocr": {"transactionDate": "2026-04-01",
+                    "transactionAmount": 100.0, "vendorName": "V1"},
+        }]
+        matching = do_all_matching(recs)
+        agg = build_aggregation(matching, recs)
+
+        spaced_dir = "/tmp/dir with spaces"
+        sink = []
+        print_openclaw_summary(
+            aggregation=agg,
+            output_dir=spaced_dir,
+            zip_path=spaced_dir + "/pkg.zip",
+            csv_path=spaced_dir + "/发票汇总.csv",
+            md_path=spaced_dir + "/下载报告.md",
+            log_path=spaced_dir + "/run.log",
+            missing_status="stop",
+            date_range=("2026/04/01", "2026/04/30"),
+            writer=lambda s: sink.append(s),
+        )
+        import json as _json
+        att = next(ln for ln in sink if ln.startswith("CHAT_ATTACHMENTS: "))
+        payload = _json.loads(att[len("CHAT_ATTACHMENTS: "):])
+        for entry in payload["files"]:
+            # Raw path, not shlex-quoted. shlex.quote would wrap spaces-paths
+            # in single quotes; raw path contains a bare space.
+            assert " " in entry["path"]
+            assert not entry["path"].startswith("'")
+            assert not entry["path"].endswith("'")
+
+    def test_sentinel_strings_unique_in_postprocess_module(self):
+        """Static guard: the literal sentinel strings should only appear
+        in the sentinel constant definitions and writer calls, not sprinkled
+        throughout the codebase. Catches accidental duplicates.
+        """
+        import os as _os
+        path = _os.path.join(
+            _os.path.dirname(__file__), "..", "scripts", "postprocess.py"
+        )
+        with open(path, encoding="utf-8") as f:
+            source = f.read()
+        # CHAT_MESSAGE_START appears in: constant def + writer call.
+        # Allow <= 2 occurrences of the literal string; flag blow-ups.
+        assert source.count('"CHAT_MESSAGE_START"') <= 2, (
+            "Unexpected duplication of CHAT_MESSAGE_START literal"
+        )
+        assert source.count('"CHAT_MESSAGE_END"') <= 2, (
+            "Unexpected duplication of CHAT_MESSAGE_END literal"
+        )
+        assert source.count('"CHAT_ATTACHMENTS: "') <= 2, (
+            "Unexpected duplication of CHAT_ATTACHMENTS prefix literal"
         )
