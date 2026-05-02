@@ -2907,3 +2907,51 @@ class TestPrintOpenClawSummary:
         # Minimal shim: build via dispatch-style call is cumbersome; just
         # assert the Decimal itself renders identically:
         assert f"{agg['grand_total']:.2f}" == expected
+
+    # -- CHAT_MESSAGE boundary sentinels (v5.6) --------------------------
+
+    def test_chat_message_anchors_wrap_non_empty_summary(self, tmp_path):
+        agg = self._populated_agg()
+        lines = self._capture(
+            aggregation=agg, **self._default_paths(tmp_path),
+            missing_status="stop", date_range=("2026/04/01", "2026/04/30"),
+        )
+        # Exactly one START, exactly one END
+        assert lines.count("CHAT_MESSAGE_START") == 1
+        assert lines.count("CHAT_MESSAGE_END") == 1
+        start = lines.index("CHAT_MESSAGE_START")
+        end = lines.index("CHAT_MESSAGE_END")
+        assert start < end
+        # Anchors are bare — no trailing colon, no payload
+        assert lines[start] == "CHAT_MESSAGE_START"
+        assert lines[end] == "CHAT_MESSAGE_END"
+
+    def test_chat_message_anchors_wrap_empty_template(self, tmp_path):
+        matching = do_all_matching([])
+        agg = build_aggregation(matching, [])
+        lines = self._capture(
+            aggregation=agg, **self._default_paths(tmp_path),
+            missing_status="stop",
+            date_range=("2026/04/01", "2026/04/30"),
+        )
+        assert lines.count("CHAT_MESSAGE_START") == 1
+        assert lines.count("CHAT_MESSAGE_END") == 1
+        start = lines.index("CHAT_MESSAGE_START")
+        end = lines.index("CHAT_MESSAGE_END")
+        assert start < end
+        # R16b "本次未下载到凭证" text falls inside the boundary
+        inner = "\n".join(lines[start + 1:end])
+        assert "本次未下载到凭证" in inner
+
+    def test_chat_message_boundary_includes_exclusions_invite(self, tmp_path):
+        agg = self._populated_agg()
+        lines = self._capture(
+            aggregation=agg, **self._default_paths(tmp_path),
+            missing_status="stop", date_range=("2026/04/01", "2026/04/30"),
+        )
+        start = lines.index("CHAT_MESSAGE_START")
+        end = lines.index("CHAT_MESSAGE_END")
+        inner = "\n".join(lines[start + 1:end])
+        # Both invite lines live inside the boundary
+        assert "💡 发现不该报销的" in inner
+        assert "learned_exclusions.json，下次自动排除" in inner

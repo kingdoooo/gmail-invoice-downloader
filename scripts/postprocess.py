@@ -1044,6 +1044,18 @@ def build_aggregation(
 
 _MISSING_STATUSES = frozenset({"stop", "run_supplemental", "ask_user"})
 
+# v5.6 Agent-facing sentinels. See SKILL.md § Presenting Results to the User
+# and docs/brainstorms/2026-05-02-chat-message-and-attachments-sentinels-requirements.md
+CHAT_MESSAGE_START_SENTINEL = "CHAT_MESSAGE_START"
+CHAT_MESSAGE_END_SENTINEL = "CHAT_MESSAGE_END"
+CHAT_ATTACHMENTS_PREFIX = "CHAT_ATTACHMENTS: "
+
+_ATTACHMENT_CAPTIONS = {
+    "zip": "报销包",
+    "md":  "报告",
+    "csv": "明细",
+}
+
 
 def print_openclaw_summary(
     aggregation: Dict[str, Any],
@@ -1075,6 +1087,10 @@ def print_openclaw_summary(
             f"allowed: {sorted(_MISSING_STATUSES)}"
         )
 
+    # Agent contract: everything between START and END is the verbatim
+    # user-facing summary. Emitted on every code path (R16a + R16b).
+    writer(CHAT_MESSAGE_START_SENTINEL)
+
     unmatched = aggregation["unmatched"]
     voucher_count = aggregation["voucher_count"]
     low = aggregation["low_conf"]
@@ -1091,6 +1107,7 @@ def print_openclaw_summary(
             "learned_exclusions.json 过滤过严"
         )
         writer(f"   检查：{os.path.abspath(log_path)}")
+        writer(CHAT_MESSAGE_END_SENTINEL)
         return
 
     # R16a: non-empty template.
@@ -1165,6 +1182,7 @@ def print_openclaw_summary(
     writer("")
     writer("💡 发现不该报销的（SaaS 订阅 / 个人账单 / 营销邮件）？")
     writer("   直接在聊天里告诉我，我会加到 learned_exclusions.json，下次自动排除。")
+    writer(CHAT_MESSAGE_END_SENTINEL)
 
 
 # =============================================================================
