@@ -663,6 +663,7 @@ def classify_email(msg_data):
         "invoice_date": extract_invoice_date_from_body(body),
         "subject": subject,
         "sender": sender,
+        "sender_email": sender_email,  # v5.7 Unit 2: bare lowercase addr
         "zip_attachments": zip_atts,
     }
     

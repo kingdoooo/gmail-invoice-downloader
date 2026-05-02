@@ -362,6 +362,10 @@ def download_attachment(client, entry, pdfs_dir, log):
             "message_id": msg_id,
             "attachment_part_id": att.get("attachmentId"),
             "internal_date": entry.get("internal_date"),
+            # v5.7 Unit 2: sender fields consumed by rename_by_ocr IGNORED
+            # branch and the learned_exclusions CTA in write_report_md.
+            "sender": entry.get("sender", ""),
+            "sender_email": entry.get("sender_email", ""),
         }
         (downloaded if ok else failed).append(rec)
     return downloaded, failed
@@ -401,6 +405,9 @@ def download_zip(client, entry, pdfs_dir, log):
                     "message_id": msg_id,
                     "attachment_part_id": f"{zid}:{os.path.basename(pdf)}",
                     "internal_date": entry.get("internal_date"),
+                    # v5.7 Unit 2: sender fields for IGNORED rename + CTA
+                    "sender": entry.get("sender", ""),
+                    "sender_email": entry.get("sender_email", ""),
                 }
                 (downloaded if ok else failed).append(rec)
     return downloaded, failed
@@ -477,6 +484,9 @@ def download_link(entry, pdfs_dir, log, known_paths=None):
         "message_id": entry.get("message_id", ""),
         "attachment_part_id": f"url:{url_key}",
         "internal_date": entry.get("internal_date"),
+        # v5.7 Unit 2: sender fields for IGNORED rename + CTA
+        "sender": entry.get("sender", ""),
+        "sender_email": entry.get("sender_email", ""),
     }
     return ([rec], []) if ok else ([], [{**rec, "reason": info}])
 

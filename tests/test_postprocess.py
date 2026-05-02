@@ -3240,3 +3240,44 @@ class TestHotelFolioNarrowGate:
             "departureDate": "2025-11-13",
         }
         assert classify_invoice(invoice) == "HOTEL_FOLIO"
+
+
+class TestSenderEmailPassthrough:
+    """Unit 2 R2 prerequisite: sender_email is exported in classify_email
+    return dict and flows through to download records, so Unit 3's
+    rename_by_ocr can compose IGNORED_{domain-label}_{base}.pdf.
+    """
+
+    def _msg(self, from_value: str) -> dict:
+        return {
+            "id": "msg-001",
+            "payload": {
+                "headers": [
+                    {"name": "From", "value": from_value},
+                    {"name": "Subject", "value": "Invoice for Termius Pro"},
+                ],
+                "body": {"data": ""},
+            },
+            "internalDate": "1731600000000",
+        }
+
+    def test_sender_email_extracted_from_name_bracket_form(self):
+        from invoice_helpers import classify_email
+        result = classify_email(self._msg("Billing <billing@termius.com>"))
+        assert result.get("sender") == "Billing <billing@termius.com>"
+        assert result.get("sender_email") == "billing@termius.com"
+
+    def test_sender_email_extracted_from_bare_address(self):
+        from invoice_helpers import classify_email
+        result = classify_email(self._msg("kent@example.com"))
+        assert result.get("sender_email") == "kent@example.com"
+
+    def test_sender_email_empty_when_sender_missing(self):
+        from invoice_helpers import classify_email
+        msg = {
+            "id": "x",
+            "payload": {"headers": [], "body": {"data": ""}},
+            "internalDate": "1731600000000",
+        }
+        result = classify_email(msg)
+        assert result.get("sender_email") == ""
