@@ -747,12 +747,197 @@ def _previous_iteration(output_dir):
         return 0
 
 
+def _run_postprocess_only(
+    *,
+    output_dir: str,
+    use_llm: bool,
+    iteration_cap: int,
+    run_start_date,
+    run_end_date,
+) -> int:
+    """Re-run Step 6-10 against an existing output dir.
+
+    Reads pdfs/ directly (not step4_downloaded.json — that is stale once
+    probe rescues land). Produces fresh three deliverables + zip.
+
+    Returns an exit code (does not sys.exit).
+    """
+    if not os.path.isdir(output_dir):
+        print(
+            f"\nREMEDIATION: --output={output_dir!r} does not exist. "
+            f"Pass a directory that holds an existing pdfs/ subdirectory.",
+            file=sys.stderr,
+        )
+        return EXIT_UNKNOWN
+
+    pdfs_dir = os.path.join(output_dir, "pdfs")
+    os.makedirs(pdfs_dir, exist_ok=True)
+
+    # Open run.log in append mode so we chain onto the original fetch's log
+    log_path = os.path.join(output_dir, "run.log")
+    log = open(log_path, "a")
+    import atexit as _atexit
+    _atexit.register(lambda f=log: (f.flush(), f.close()) if not f.closed else None)
+
+    def say(msg):
+        print(msg)
+        print(msg, file=log, flush=True)
+
+    iteration = _previous_iteration(output_dir) + 1
+    say("=" * 70)
+    say(f"Gmail Invoice Downloader — POSTPROCESS-ONLY iteration={iteration}")
+    say(f"Run started @ {datetime.datetime.now(CST).strftime('%Y-%m-%d %H:%M:%S')} CST")
+    say("=" * 70)
+    say(f"LLM provider: {os.environ.get('LLM_PROVIDER', 'bedrock')}"
+        + (" [disabled]" if not use_llm else ""))
+
+    # Build synthetic records from pdfs/ — Step 6 forward works off `path`
+    # + `valid` + optional `internal_date`.
+    records = []
+    for fname in sorted(os.listdir(pdfs_dir)):
+        if not fname.lower().endswith(".pdf"):
+            continue
+        records.append({
+            "path": os.path.join(pdfs_dir, fname),
+            "valid": True,
+            "method": "POSTPROCESS_ONLY",
+            "merchant": None,
+            "date": None,
+            "doc_type": "UNKNOWN",
+            "message_id": fname,
+            "subject": fname,
+            "internal_date": None,
+        })
+    say(f"Found {len(records)} PDF(s) in {pdfs_dir}")
+
+    # --- Step 6: OCR ---
+    if use_llm and records:
+        say("\n--- Step 6: LLM OCR + classify + plausibility ---")
+        t0 = time.time()
+        try:
+            analyses = analyze_pdf_batch(
+                records, max_workers=2, use_llm=use_llm, logger=log,
+            )
+        except (LLMAuthError, LLMConfigError) as e:
+            say(f"❌ LLM config error: {e}")
+            print(f"\nREMEDIATION: {e}", file=sys.stderr)
+            log.close()
+            return EXIT_LLM_CONFIG
+        say(f"  OCR done for {len(analyses)} files in {time.time()-t0:.1f}s")
+
+        # --- Step 7: rename by OCR ---
+        say("\n--- Step 7: rename files by OCR ---")
+        renamed = 0
+        for rec in records:
+            analysis = analyses.get(rec.get("path")) or {}
+            old_name = os.path.basename(rec.get("path", ""))
+            rename_by_ocr(rec, analysis, pdfs_dir)
+            new_name = os.path.basename(rec.get("path", ""))
+            if new_name != old_name:
+                renamed += 1
+        say(f"  renamed {renamed}/{len(records)} files")
+    else:
+        say("\n--- Step 6+7: skipped (LLM disabled or no PDFs) ---")
+        for rec in records:
+            rec["category"] = "UNPARSED"
+            rec["ocr"] = None
+
+    # --- Step 8: matching ---
+    say("\n--- Step 8: matching ---")
+    matching_result = do_all_matching(records)
+
+    # --- Step 8.5: aggregation ---
+    dedup_removed_ids = {id(r) for r in matching_result.get("dedup_removed", [])}
+    valid_records = [
+        d for d in records
+        if d.get("valid") and id(d) not in dedup_removed_ids
+    ]
+    aggregation = build_aggregation(matching_result, valid_records)
+
+    # --- Step 9a: 下载报告.md ---
+    report_path = os.path.join(output_dir, "下载报告.md")
+    write_report_md(
+        report_path,
+        downloaded_all=records,
+        failed=[],
+        skipped=[],
+        matching_result=matching_result,
+        date_range=(run_start_date or "?", run_end_date or "?"),
+        iteration=iteration,
+        supplemental=False,
+        aggregation=aggregation,
+    )
+    say(f"\n✅ Report:   {report_path}")
+
+    # --- Step 9b: 发票汇总.csv ---
+    csv_path = os.path.join(output_dir, "发票汇总.csv")
+    n_csv = write_summary_csv(csv_path, aggregation)
+    say(f"✅ CSV:      {csv_path}  ({n_csv} rows)")
+
+    # --- Step 9c: missing.json ---
+    missing_path = os.path.join(output_dir, "missing.json")
+    prev_hash = _previous_convergence_hash(output_dir)
+    # Task 2 leaves run_start_date/run_end_date out of write_missing_json —
+    # Task 4 will add those kwargs and thread them through.
+    missing_payload = write_missing_json(
+        missing_path,
+        batch_dir=output_dir,
+        iteration=iteration,
+        iteration_cap=iteration_cap,
+        matching_result=matching_result,
+        unparsed_records=matching_result.get("unparsed", []),
+        previous_convergence_hash=prev_hash,
+    )
+    say(f"✅ missing.json: {missing_path}  "
+        f"(status={missing_payload['status']}, "
+        f"next={missing_payload['recommended_next_action']}, "
+        f"items={len(missing_payload['items'])})")
+
+    # --- Step 10: zip ---
+    zip_path = None
+    try:
+        zip_path = zip_output(output_dir)
+        say(f"✅ Zip:      {zip_path}")
+    except RuntimeError as e:
+        say(f"⚠️  zip skipped: {e}")
+
+    # --- Exit semantics ---
+    if not records:
+        print(
+            "\nREMEDIATION: no PDFs found in pdfs/. Nothing to postprocess. "
+            "Run a normal Gmail fetch first or add PDFs manually.",
+            file=sys.stderr,
+        )
+        log.close()
+        return EXIT_PARTIAL
+
+    hotel = matching_result.get("hotel", {})
+    rh = matching_result.get("ridehailing", {})
+    unparsed = matching_result.get("unparsed", [])
+    if (unparsed or hotel.get("unmatched_invoices") or hotel.get("unmatched_folios")
+            or rh.get("unmatched_invoices") or rh.get("unmatched_receipts")):
+        print(
+            "\nREMEDIATION: partial result — inspect missing.json for items "
+            "needing follow-up (run_supplemental, probe, or user action).",
+            file=sys.stderr,
+        )
+        log.close()
+        return EXIT_PARTIAL
+
+    log.close()
+    return EXIT_OK
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="Gmail Invoice Downloader v5.3 — search, download, OCR, match, report.",
     )
-    ap.add_argument("--start", required=True, help="Gmail date: 2026/01/01")
-    ap.add_argument("--end", required=True, help="Gmail date (exclusive): 2026/05/01")
+    # --start / --end are required for normal runs. In --postprocess-only mode
+    # (Step 6-10 only, no Gmail) the date range is irrelevant; we check + enforce
+    # the non-postprocess-only case manually below so argparse doesn't reject
+    # the agent's probe-rescue invocation.
+    ap.add_argument("--start", required=False, help="Gmail date: 2026/01/01")
+    ap.add_argument("--end", required=False, help="Gmail date (exclusive): 2026/05/01")
     ap.add_argument("--output", required=True, help="Output directory")
     ap.add_argument("--creds", default=DEFAULT_CREDS)
     ap.add_argument("--token", default=DEFAULT_TOKEN)
@@ -768,6 +953,15 @@ def main():
                     help="Max loop iterations before status=max_iterations_reached.")
     ap.add_argument("--query", default=None,
                     help="Override default INVOICE_KEYWORDS (supplemental narrow search).")
+    ap.add_argument(
+        "--postprocess-only",
+        action="store_true",
+        help=(
+            "Skip Gmail search/download (Step 1-5). Re-run OCR + matching + "
+            "deliverables (Step 6-10) against existing <output>/pdfs/. Use "
+            "after curling a rescued PDF into pdfs/ (see SKILL.md auto-probe)."
+        ),
+    )
 
     # v5.3 LLM provider flags
     ap.add_argument("--no-llm", action="store_true",
@@ -791,6 +985,33 @@ def main():
                     help="Skip doctor.py preflight checks (not recommended).")
 
     args = ap.parse_args()
+
+    # Enforce --start / --end outside --postprocess-only (they were declared
+    # non-required so the postprocess-only path stays ergonomic, but the Gmail
+    # flow genuinely requires them).
+    if not args.postprocess_only and (not args.start or not args.end):
+        print(
+            "\nREMEDIATION: --start and --end are required for normal runs. "
+            "Pass --postprocess-only to skip Gmail and re-run Step 6-10 against "
+            "existing <output>/pdfs/.",
+            file=sys.stderr,
+        )
+        sys.exit(EXIT_UNKNOWN)
+
+    # --- --postprocess-only: skip Gmail (Step 1-5), just redo Step 6-10 ---
+    if args.postprocess_only:
+        # Propagate --no-llm / --llm-provider to env so the singleton picks it up.
+        if args.no_llm:
+            os.environ["LLM_PROVIDER"] = "none"
+        elif args.llm_provider:
+            os.environ["LLM_PROVIDER"] = args.llm_provider
+        sys.exit(_run_postprocess_only(
+            output_dir=os.path.expanduser(args.output),
+            use_llm=(os.environ.get("LLM_PROVIDER", "bedrock") != "none"),
+            iteration_cap=args.iteration_cap,
+            run_start_date=args.start,
+            run_end_date=args.end,
+        ))
 
     # --- Preflight ---
     if not args.skip_preflight:

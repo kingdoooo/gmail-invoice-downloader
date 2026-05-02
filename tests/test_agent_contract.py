@@ -23,7 +23,9 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import subprocess
 import sys
+import tempfile
 import zipfile
 from pathlib import Path
 from typing import Any, Dict, List
@@ -937,3 +939,86 @@ class TestDownloadLinkDedupScope:
             log.close()
 
         assert d == [] and fl == [], "in-run byte-identical duplicate must collapse"
+
+
+# =============================================================================
+# --postprocess-only flag contract — re-run Step 6-10 against existing pdfs/
+# =============================================================================
+
+class TestPostprocessOnlyFlag:
+    """--postprocess-only skips Gmail (Step 1-5) and re-runs OCR + matching
+    + deliverables (Step 6-10) against existing <out>/pdfs/."""
+
+    def test_empty_pdfs_dir_produces_report_and_exits_5(self):
+        """Empty pdfs/ → no crash, writes empty deliverables, exits 5."""
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, "pdfs"))
+            result = subprocess.run(
+                [
+                    "python3", "scripts/download-invoices.py",
+                    "--postprocess-only",
+                    "--output", tmp,
+                    "--no-llm",    # keep test offline
+                ],
+                capture_output=True, text=True,
+            )
+            assert result.returncode == 5, result.stderr
+            assert "REMEDIATION:" in result.stderr
+            # Deliverables exist
+            assert os.path.exists(os.path.join(tmp, "下载报告.md"))
+            assert os.path.exists(os.path.join(tmp, "missing.json"))
+
+    def test_rejects_missing_output_dir(self):
+        """Unknown output dir → exits non-zero with REMEDIATION."""
+        result = subprocess.run(
+            [
+                "python3", "scripts/download-invoices.py",
+                "--postprocess-only",
+                "--output", "/nonexistent/path/xyz",
+                "--no-llm",
+            ],
+            capture_output=True, text=True,
+        )
+        assert result.returncode != 0
+        assert "REMEDIATION:" in result.stderr
+
+    def test_existing_pdfs_dir_rewrites_deliverables(self, monkeypatch, tmp_path):
+        """pdfs/ with one cached-OCR PDF → report + missing.json regenerate."""
+        import shutil
+        fixtures = os.environ.get(
+            "GMAIL_INVOICE_FIXTURES",
+            os.path.expanduser("~/Documents/agent Test/"),
+        )
+        if not os.path.isdir(fixtures):
+            pytest.skip(f"Fixtures dir missing: {fixtures}")
+
+        # Find any sample PDF from fixtures
+        sample = None
+        for root, _dirs, files in os.walk(fixtures):
+            for f in files:
+                if f.lower().endswith(".pdf"):
+                    sample = os.path.join(root, f)
+                    break
+            if sample:
+                break
+        if sample is None:
+            pytest.skip("No PDF in fixtures dir")
+
+        pdfs_dir = tmp_path / "pdfs"
+        pdfs_dir.mkdir()
+        shutil.copy(sample, pdfs_dir / "sample.pdf")
+
+        result = subprocess.run(
+            [
+                "python3", "scripts/download-invoices.py",
+                "--postprocess-only",
+                "--output", str(tmp_path),
+                "--no-llm",
+            ],
+            capture_output=True, text=True,
+        )
+        # With --no-llm the PDF becomes UNPARSED → exit 5
+        assert result.returncode in (0, 5), result.stderr
+        assert os.path.exists(tmp_path / "下载报告.md")
+        missing = json.loads(open(tmp_path / "missing.json").read())
+        assert missing["schema_version"] == "1.0"
