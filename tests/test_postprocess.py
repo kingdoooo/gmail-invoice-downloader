@@ -3222,10 +3222,19 @@ class TestHotelFolioNarrowGate:
         """is_hotel_folio_by_fields 3-choose-2 of roomNumber/arrivalDate/
         departureDate is untouched by Unit 1; legit folios go through this
         path unaffected.
+
+        Use an empty docType so is_hotel_folio_by_doctype short-circuits
+        at its `if not doc_type` guard and cannot mask a fields-path
+        regression. Previous version used "any" which relied on the
+        keyword set not containing that literal — brittle.
         """
-        from core.classify import classify_invoice
+        from core.classify import classify_invoice, is_hotel_folio_by_doctype
+        # Make the precondition explicit: doc_type does not match any
+        # is_hotel_folio_by_doctype keyword, so only the fields path can
+        # produce HOTEL_FOLIO here.
+        assert is_hotel_folio_by_doctype("") is False
         invoice = {
-            "docType": "any",  # docType narrow gate not reached
+            "docType": "",
             "roomNumber": "1205",
             "arrivalDate": "2025-11-12",
             "departureDate": "2025-11-13",

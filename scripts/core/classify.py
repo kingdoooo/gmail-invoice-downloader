@@ -8,7 +8,7 @@ Classification Priority:
 1. docType special document types + core field detection
 2. invoiceCode 12-digit -> TAXI
 3. serviceType + Chinese invoice detection
-4. UNKNOWN
+4. IGNORED (v5.7 — see MODIFIED block below)
 
 MODIFIED for gmail-invoice-downloader v5.3:
 - Removed COFFEE_KEYWORDS and MEAL_TYPES (non-deterministic random assignment
@@ -313,7 +313,7 @@ def classify_invoice(invoice: Dict[str, Any]) -> str:
     1. docType special document types + core field detection
     2. invoiceCode 12-digit -> TAXI
     3. serviceType + Chinese invoice detection
-    4. UNKNOWN
+    4. IGNORED (v5.7: fallthrough renamed from UNKNOWN)
 
     Args:
         invoice: Extracted invoice data

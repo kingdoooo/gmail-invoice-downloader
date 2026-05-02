@@ -30,29 +30,33 @@ import sys
 from typing import Any, Dict, List
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-from core.classify import classify_invoice as classify_new  # noqa: E402
+from core.classify import (  # noqa: E402
+    classify_invoice as classify_new,
+    is_chinese_invoice_document,
+    is_hotel_folio_by_doctype,
+    is_hotel_folio_by_fields,
+    is_hotel_service,
+    is_meal_service,
+    is_mobile_service,
+    is_ridehailing_receipt,
+    is_ridehailing_service,
+    is_taxi_invoice_by_doctype,
+    is_tolls_service,
+    is_train_ticket,
+)
 
 
 def classify_legacy(invoice: Dict[str, Any]) -> str:
     """Snapshot of the pre-v5.7 classify_invoice (fallthrough = UNKNOWN,
     docType narrow gate disabled — just docType keyword match).
 
-    Inlined so the replay runs against a known baseline even after the
-    real classify.py has moved on. Do NOT import from core.classify.
+    Orchestration inlined so the replay runs against a known baseline
+    even after the real classify.py's classify_invoice has moved on.
+    Helper functions (is_hotel_folio_*, is_*_service, etc.) are imported
+    live — if one of them tightens, the "legacy" replay moves with the
+    helper, which is an accepted cost noted in the v5.7 plan. Do NOT
+    import classify_invoice itself from core.classify here.
     """
-    from core.classify import (
-        is_chinese_invoice_document,
-        is_hotel_folio_by_doctype,
-        is_hotel_folio_by_fields,
-        is_hotel_service,
-        is_meal_service,
-        is_mobile_service,
-        is_ridehailing_receipt,
-        is_ridehailing_service,
-        is_taxi_invoice_by_doctype,
-        is_tolls_service,
-        is_train_ticket,
-    )
     service_type = invoice.get('serviceType', '') or ''
     doc_type = invoice.get('docType', '') or ''
     invoice_code = invoice.get('invoiceCode', '') or ''
