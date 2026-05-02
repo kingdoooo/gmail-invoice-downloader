@@ -1022,3 +1022,73 @@ class TestPostprocessOnlyFlag:
         assert os.path.exists(tmp_path / "下载报告.md")
         missing = json.loads(open(tmp_path / "missing.json").read())
         assert missing["schema_version"] == "1.0"
+
+
+# =============================================================================
+# record-unknown-platform.py helper — auto-probe loop terminal surface
+# =============================================================================
+
+class TestRecordUnknownPlatform:
+    """scripts/record-unknown-platform.py appends an unknown_platform item
+    and flips missing.json status to user_action_required."""
+
+    def _write_base_missing(self, path):
+        """Write a minimal v1.0 missing.json for the helper to mutate."""
+        base = {
+            "schema_version": "1.0",
+            "generated_at": "2026-05-02T12:00:00+08:00",
+            "iteration": 1,
+            "iteration_cap": 3,
+            "status": "converged",
+            "recommended_next_action": "stop",
+            "convergence_hash": "0" * 16,
+            "batch_dir": os.path.dirname(path),
+            "items": [],
+        }
+        with open(path, "w") as f:
+            json.dump(base, f)
+
+    def test_appends_unknown_platform_item_and_flips_status(self, tmp_path):
+        mpath = tmp_path / "missing.json"
+        self._write_base_missing(mpath)
+
+        result = subprocess.run(
+            [
+                "python3", "scripts/record-unknown-platform.py",
+                "--output", str(tmp_path),
+                "--url", "https://unknown-host.cn/s/abc123",
+                "--email-subject", "发票 2025-04-15",
+                "--email-from", "invoice@unknown-host.cn",
+                "--probe-suggestion", "probe found 3x 302 then HTML",
+            ],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 0, result.stderr
+
+        data = json.loads(mpath.read_text())
+        assert data["status"] == "user_action_required"
+        assert data["recommended_next_action"] == "ask_user"
+        assert len(data["items"]) == 1
+        item = data["items"][0]
+        assert item["type"] == "unknown_platform"
+        assert item["original_url"] == "https://unknown-host.cn/s/abc123"
+        assert item["email_subject"] == "发票 2025-04-15"
+        assert item["email_from"] == "invoice@unknown-host.cn"
+        assert "probe found" in item["probe_suggestion"]
+        # convergence_hash recomputed (not equal to all-zeros sentinel)
+        assert data["convergence_hash"] != "0" * 16
+
+    def test_rejects_missing_file(self, tmp_path):
+        result = subprocess.run(
+            [
+                "python3", "scripts/record-unknown-platform.py",
+                "--output", str(tmp_path),
+                "--url", "https://x.y/z",
+                "--email-subject", "s",
+                "--email-from", "f",
+                "--probe-suggestion", "p",
+            ],
+            capture_output=True, text=True,
+        )
+        assert result.returncode != 0
+        assert "REMEDIATION:" in result.stderr

@@ -422,7 +422,11 @@ python3 scripts/download-invoices.py \
 switch status:
   case "converged":                 → DONE（收敛）
   case "max_iterations_reached":    → DONE（请用户手动补，提示 items 中 needed_for 列表）
-  case "user_action_required":      → DONE（有 extraction_failed，提示人工检查）
+  case "user_action_required":      → DONE。items 中可能包含:
+                                     - type=extraction_failed (LLM 读不出的 PDF，人工核查 PDF 是否损坏)
+                                     - type=unknown_platform (probe 也识别不出的新平台，列出清单
+                                       提示用户，建议参考 references/platforms.md 的 5-step playbook
+                                       评估是否扩展支持)
   case "needs_retry":
       # 聚合所有 search_suggestion 为一个 union query，一次补搜一网打尽
       union_query = " OR ".join(item.search_suggestion.query for item in items if item.search_suggestion)
@@ -442,6 +446,40 @@ switch status:
 
 **关键：每轮只做一次 union call**（不是 for-item 跑 N 个调用）。脚本 merge 新下载到 step4_downloaded.json，重算 matching 和 missing.json。
 
+### Failed-link auto-probe (exit 5, before run_supplemental)
+
+当 `run.log` 中出现 `failed to resolve … short link` 条目时，在决定 `run_supplemental` **之前** 先逐一处理：
+
+1. 从 `run.log` 提取原始 URL。
+2. 运行：`python3 scripts/probe-platform.py "<url>"`
+3. 若 probe 输出了 PDF 下载 URL：
+   - `curl -sL --max-time 60 -H "User-Agent: Mozilla/5.0" -o <out>/pdfs/probe_<msgid>.pdf "<pdf_url>"`
+   - 校验 `%PDF` 头（前 4 字节）。
+   - 成功后，重新跑 postprocess：
+     `python3 scripts/download-invoices.py --postprocess-only --output <out>`
+4. 若 probe 找不到 PDF URL（未知平台 / 链路断裂）：
+   - 从 `<out>/step3_classified.json` 取邮件 subject / from。
+   - 通过 helper 上浮给用户：
+     ```
+     python3 scripts/record-unknown-platform.py \
+         --output <out> \
+         --url "<url>" \
+         --email-subject "<subject>" \
+         --email-from "<from>" \
+         --probe-suggestion "<probe stdout 下一步建议>"
+     ```
+     该 helper 会向 `missing.json.items[]` 追加 `unknown_platform` 条目、
+     将 `status` 翻转为 `user_action_required`、重算 `convergence_hash`。
+
+所有失败链路处理完后：
+
+- 全部自动恢复 → 重新读 `missing.json`，继续 Loop 决策。
+- 存在未恢复项 → `missing.json.status` 变为 `user_action_required`，
+  本批次 Loop 终止。在 OpenClaw 聊天总结中列出：
+  - 原邮件 subject + 发件人
+  - probe 主机 / 建议
+  - 指向 `references/platforms.md` 的 5-step 新平台接入 playbook
+
 ### 收敛保护
 
 - **`iteration_cap=3`** — 脚本在第 3 轮输出 `status=max_iterations_reached`
@@ -459,7 +497,7 @@ switch status:
 | 2 | Gmail auth 失败 | `run scripts/gmail-auth.py` |
 | 3 | LLM config 失败 | 查 stderr REMEDIATION：针对当前 provider 调 AWS/Anthropic/OpenAI 凭证，或切 `--llm-provider=none` |
 | 4 | Gmail 配额超限 | 等 60 秒 + `--max-results` 降低 |
-| 5 | 部分成功 | 正常出交付物，但有 UNPARSED 或 failed 项 → 查 missing.json |
+| 5 | 部分成功 | 正常出交付物，但有 UNPARSED 或 failed 项 → 查 missing.json → 先跑 auto-probe（见 Loop Playbook 子节）再决定 run_supplemental |
 
 Agent pattern-match stderr `REMEDIATION:` 行自动恢复。
 
