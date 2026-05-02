@@ -737,12 +737,20 @@ def write_report_md(
             "不进入 CSV / 打包 zip。文件仍保留在 PDFs 目录下以 `IGNORED_` "
             "前缀标记，可人工核查。\n"
         )
-        # Per-record listing: show sender_email + amount
+        # Per-record listing: show sender_email + amount.
+        # LLM-returned transactionAmount is unvalidated JSON — it can come
+        # back as a string like "120.00" or garbage. Coerce to float the
+        # same way postprocess._to_float does; unconvertible → "金额未识别"
+        # (same fallback as missing).
         for rec in ignored_records:
             sender_email = rec.get("sender_email") or ""
             label = sender_email if sender_email else "未知发件人"
             ocr = rec.get("ocr") or {}
-            amount = ocr.get("transactionAmount")
+            raw_amount = ocr.get("transactionAmount")
+            try:
+                amount = float(raw_amount) if raw_amount not in (None, "") else None
+            except (TypeError, ValueError):
+                amount = None
             currency = ocr.get("currency") or ""
             if amount is not None:
                 prefix = "¥" if not currency or currency == "CNY" else ""
@@ -752,7 +760,11 @@ def write_report_md(
                 lines.append(f"- {label}：金额未识别")
         lines.append("")
 
-        # CTA: aggregate by email domain, render -from:<domain> lines
+        # CTA: aggregate by full email domain, render -from:<domain> lines.
+        # Intentionally different from Unit 3's filename `domain_label` (which
+        # is split-on-first-dot, e.g. "termius" for a friendly tag). Here we
+        # need the whole domain because Gmail's `-from:termius.com` operator
+        # requires a full domain for suffix matching.
         domain_counts = {}
         for rec in ignored_records:
             sender_email = rec.get("sender_email") or ""

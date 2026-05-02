@@ -3624,3 +3624,25 @@ class TestIgnoredCtaRendering:
         # No empty-domain CTA line
         assert "-from:\n" not in text
         assert "-from: " not in text
+
+    def test_string_amount_coerced_no_crash(self, tmp_path):
+        """LLM-returned transactionAmount can come back as a string
+        ('120.00') or unconvertible garbage ('unknown'). Report must
+        coerce via float() and degrade to '金额未识别' on failure, never
+        crash with ValueError from f'{str:.2f}'.
+        """
+        write_report_md = self._load_write_report_md()
+        ignored = [
+            {"sender_email": "billing@termius.com",
+             "ocr": {"transactionAmount": "120.00"}},       # numeric string
+            {"sender_email": "receipts@openrouter.ai",
+             "ocr": {"transactionAmount": "unknown"}},      # unconvertible
+        ]
+        out = tmp_path / "report.md"
+        # Must not raise.
+        write_report_md(str(out), **self._base_args(), ignored_records=ignored)
+        text = out.read_text()
+        # Coerced numeric string renders like a real amount:
+        assert "¥120.00" in text
+        # Unconvertible falls through to the "金额未识别" branch:
+        assert "receipts@openrouter.ai：金额未识别" in text
