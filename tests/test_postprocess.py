@@ -3078,3 +3078,29 @@ class TestPrintOpenClawSummary:
             f"Expected CHAT_MESSAGE_END to be the last line on R16b, "
             f"but lines after it: {lines[end_idx+1:]}"
         )
+
+
+class TestPromptContract:
+    """Unit 0 R5: guard the hotel-field conditional extraction rule in prompts.py.
+
+    The rule prevents LLM from filling arrival/departure/room fields from
+    non-hotel contexts (subscription period, date due, etc.), which would
+    otherwise trigger is_hotel_folio_by_fields 3-choose-2 on SaaS invoices.
+    Keep these substrings synced with the rule text in prompts.py.
+    """
+
+    def test_hotel_conditional_rule_present(self):
+        from core.prompts import get_ocr_prompt
+        prompt = get_ocr_prompt()
+        # Core rule phrasing — do not remove during snapshot sync with
+        # reimbursement-helper without re-reading SKILL.md Lessons Learned v5.7.
+        required_substrings = [
+            "Hotel-specific field conditional extraction",
+            "subscription period",
+            "date due",
+            "入离日期",
+            "房号",
+            "MUST remain `null`",
+        ]
+        for s in required_substrings:
+            assert s in prompt, f"Prompt missing required substring: {s!r}"

@@ -85,6 +85,16 @@ def get_ocr_prompt() -> str:
 
 若 departureDate 无法识别（水单残缺或信息缺失），则 transactionDate 填 null，不要猜测或用 arrivalDate 代替。
 
+## ⚠️ Hotel-specific field conditional extraction (v5.7)
+
+`arrivalDate / departureDate / checkInDate / checkOutDate / roomNumber` MUST be populated **only** when the source PDF contains explicit hotel-domain labels near the value, including any of:
+- English: `Arrival`, `Departure`, `Check-in`, `Check-out`, `Check in`, `Check out`, `Room No.`, `Room Number`
+- Chinese: `入住日期`, `抵店日期`, `离店日期`, `退房日期`, `到达日期`, `离开日期`, `入离日期`, `房号`, `房间号`, `房间号码`
+
+If a date or number appears only in non-hotel contexts — such as subscription period, service period, billing cycle, date of issue, date due, date paid, or payment history — these fields MUST remain `null`. Do NOT infer, guess, or transcribe subscription ranges (e.g. "Nov 12, 2025 – Nov 12, 2026") into arrivalDate/departureDate.
+
+Rationale: downstream classifier uses these fields to distinguish hotel folios from SaaS invoices. Filling them without hotel-domain textual evidence causes non-reimbursable SaaS receipts to be misrouted into the hotel matching pipeline.
+
 ## 网约车发票专用字段
 
 | 字段名 | 类型 | 说明 |
