@@ -2,6 +2,28 @@
 
 本项目的版本声明仅在 `SKILL.md` 第 1 行（`# Gmail Invoice Downloader (vX.Y)`）。下方记录每个版本的发布说明；最新版本在最上面。
 
+## v5.6 — Agent-delivered chat attachments + 可信消息原文 (2026-05-02)
+
+- **feat(postprocess):** `print_openclaw_summary` 现在在 stdout 每次产出 `CHAT_MESSAGE_START` / `CHAT_MESSAGE_END` 两条裸锚点行，包住给用户看的完整中文摘要（包括结尾的 "💡 发现不该报销的…" 提示）。Agent 必须原文转发两者之间的内容 — 不增、不删、不翻译、不挑重点。修复 v5.5 前"结尾提示常被 Agent 当装饰文字砍掉"的问题。
+- **feat(postprocess):** R16a 非空路径在 `CHAT_MESSAGE_END` 之后额外输出单行 JSON `CHAT_ATTACHMENTS: {...}`，声明本次产出的三份交付物（zip + MD + CSV）。Agent 按 `files[]` 顺序（报销包 → 报告 → 明细）用当前 channel 原生消息工具（飞书 / Slack / Discord / WhatsApp / iMessage）作为附件上传到当前会话。Skill 本身 channel-agnostic，不依赖任何特定 IM SDK。
+- **feat(postprocess):** `zip_output` 失败时（DEC-6 降级）`CHAT_ATTACHMENTS` JSON 会跳过 zip 条目，但仍声明 MD + CSV — 附件发送不会因打包失败整体塌陷。
+- **docs(SKILL):** 新增 `## Presenting Results to the User` 顶层章节，文档化两条 sentinel 契约 + Agent Playbook（先转发摘要后上传附件；单个上传失败补警告行不中断；channel 不支持附件时降级为路径文本）。
+- **test(agent-contract):** 新增 R18 契约测试类 `TestChatSentinelContract`（11 个测试），锁定锚点格式、顺序不变量（START < END < ATTACHMENTS）、JSON schema（`{files: [{path, caption}]}`）、caption 合法取值（报销包 / 报告 / 明细）、zip 失败降级、单行 payload 不变量、路径不做 shell quote。镜像 R8 `REMEDIATION:` 契约的结构。
+- **test(postprocess):** `TestPrintOpenClawSummary` 新增 10 个测试覆盖 R16a / R16b / zip 失败 / ValueError 各路径下的锚点行为。
+
+### 不变量
+
+- 每条 sentinel 在单次 Skill 运行中各自至多出现一次。
+- 严格顺序：`CHAT_MESSAGE_START` → `CHAT_MESSAGE_END` → `CHAT_ATTACHMENTS:`（后两者可缺席）。
+- `CHAT_ATTACHMENTS:` 存在 ⇒ `CHAT_MESSAGE_START` / `END` 一定存在。
+- R16b 空结果路径：只发两条锚点，不发 attachments。
+- 早期错误路径（Gmail auth / LLM 配置）：两条 sentinel 都不发，Agent 走 `REMEDIATION:` 路径。
+
+### 升级备注
+
+- **无 schema 破坏性改动：** `missing.json` v1.0 schema、`REMEDIATION:` stderr 行、exit codes 的既有语义全部保持不变。`print_openclaw_summary` 签名未改。
+- **现有 OpenClaw 部署：** 老版 Agent（不识别 sentinel）运行本版 Skill 不会崩 — 锚点和 JSON 行会作为普通输出出现在 stdout 里，看着像多了两行"杂讯"，但不影响 Skill 本身的功能。要获得"附件直接出现在聊天里"的体验，需要让 Agent 按本版 SKILL.md 新增章节的 Playbook 消费 sentinel。
+
 ## v5.5 — Agent-ready polish + OCR 校准 (2026-05-02)
 
 - **fix(nuonuo):** 短链提取正则排除 `/allow` QR 图片 URL + `/invoice /scan /sapi /scan-invoice`。修复「雨花台区程旭餐饮店」等诺诺网发票「failed to resolve」假阳性。
