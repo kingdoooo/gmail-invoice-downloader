@@ -2955,3 +2955,126 @@ class TestPrintOpenClawSummary:
         # Both invite lines live inside the boundary
         assert "💡 发现不该报销的" in inner
         assert "learned_exclusions.json，下次自动排除" in inner
+
+    # -- CHAT_ATTACHMENTS JSON sentinel (v5.6) ---------------------------
+
+    @staticmethod
+    def _extract_attachments(lines: List[str]) -> Optional[Dict[str, Any]]:
+        """Find `CHAT_ATTACHMENTS: {...}` line and return parsed JSON, or None."""
+        import json as _json
+        prefix = "CHAT_ATTACHMENTS: "
+        for ln in lines:
+            if ln.startswith(prefix):
+                return _json.loads(ln[len(prefix):])
+        return None
+
+    def test_attachments_emitted_normal_three_deliverables(self, tmp_path):
+        agg = self._populated_agg()
+        paths = self._default_paths(tmp_path)
+        lines = self._capture(
+            aggregation=agg, **paths,
+            missing_status="stop", date_range=("2026/04/01", "2026/04/30"),
+        )
+        payload = self._extract_attachments(lines)
+        assert payload is not None
+        files = payload["files"]
+        assert len(files) == 3
+        assert files[0]["caption"] == "报销包"
+        assert files[1]["caption"] == "报告"
+        assert files[2]["caption"] == "明细"
+        for f in files:
+            assert os.path.isabs(f["path"])
+        assert files[0]["path"] == os.path.abspath(paths["zip_path"])
+        assert files[1]["path"] == os.path.abspath(paths["md_path"])
+        assert files[2]["path"] == os.path.abspath(paths["csv_path"])
+
+    def test_attachments_omits_zip_when_zip_failed(self, tmp_path):
+        agg = self._populated_agg()
+        paths = self._default_paths(tmp_path)
+        paths["zip_path"] = None
+        lines = self._capture(
+            aggregation=agg, **paths,
+            missing_status="stop",
+            date_range=("2026/04/01", "2026/04/30"),
+        )
+        payload = self._extract_attachments(lines)
+        assert payload is not None
+        files = payload["files"]
+        assert len(files) == 2
+        captions = [f["caption"] for f in files]
+        assert "报销包" not in captions
+        assert captions == ["报告", "明细"]
+
+    def test_attachments_omitted_on_empty_template(self, tmp_path):
+        matching = do_all_matching([])
+        agg = build_aggregation(matching, [])
+        lines = self._capture(
+            aggregation=agg, **self._default_paths(tmp_path),
+            missing_status="stop",
+            date_range=("2026/04/01", "2026/04/30"),
+        )
+        assert any(ln == "CHAT_MESSAGE_START" for ln in lines)
+        assert any(ln == "CHAT_MESSAGE_END" for ln in lines)
+        assert not any(ln.startswith("CHAT_ATTACHMENTS: ") for ln in lines)
+
+    def test_attachments_after_message_end(self, tmp_path):
+        agg = self._populated_agg()
+        lines = self._capture(
+            aggregation=agg, **self._default_paths(tmp_path),
+            missing_status="stop", date_range=("2026/04/01", "2026/04/30"),
+        )
+        end_idx = lines.index("CHAT_MESSAGE_END")
+        att_idx = next(
+            i for i, ln in enumerate(lines)
+            if ln.startswith("CHAT_ATTACHMENTS: ")
+        )
+        assert att_idx > end_idx
+
+    def test_attachments_json_is_valid_utf8(self, tmp_path):
+        """JSON line parses and preserves Chinese captions (ensure_ascii=False)."""
+        agg = self._populated_agg()
+        lines = self._capture(
+            aggregation=agg, **self._default_paths(tmp_path),
+            missing_status="stop", date_range=("2026/04/01", "2026/04/30"),
+        )
+        att_line = next(
+            ln for ln in lines if ln.startswith("CHAT_ATTACHMENTS: ")
+        )
+        assert "报销包" in att_line
+        import json as _json
+        payload = _json.loads(att_line[len("CHAT_ATTACHMENTS: "):])
+        assert "files" in payload
+
+    def test_unknown_missing_status_raises_without_emitting_start(self, tmp_path):
+        """ValueError must fire before any sentinel is written (no half-open
+        CHAT_MESSAGE_START with missing END). Guards against future refactors
+        that reorder the validation and the START emission.
+        """
+        agg = self._populated_agg()
+        sink: List[str] = []
+        with pytest.raises(ValueError):
+            print_openclaw_summary(
+                aggregation=agg, **self._default_paths(tmp_path),
+                missing_status="bogus",
+                date_range=("2026/04/01", "2026/04/30"),
+                writer=lambda s: sink.append(s),
+            )
+        assert "CHAT_MESSAGE_START" not in sink
+        assert "CHAT_MESSAGE_END" not in sink
+
+    def test_chat_message_end_is_terminal_on_empty_path(self, tmp_path):
+        """On R16b (empty result), CHAT_MESSAGE_END must be the final line —
+        nothing may leak after it, including CHAT_ATTACHMENTS.
+        """
+        matching = do_all_matching([])
+        agg = build_aggregation(matching, [])
+        lines = self._capture(
+            aggregation=agg, **self._default_paths(tmp_path),
+            missing_status="stop",
+            date_range=("2026/04/01", "2026/04/30"),
+        )
+        end_idx = lines.index("CHAT_MESSAGE_END")
+        assert end_idx == len(lines) - 1, (
+            f"Expected CHAT_MESSAGE_END to be the last line on R16b, "
+            f"but lines after it: {lines[end_idx+1:]}"
+        )

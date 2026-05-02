@@ -1184,6 +1184,30 @@ def print_openclaw_summary(
     writer("   直接在聊天里告诉我，我会加到 learned_exclusions.json，下次自动排除。")
     writer(CHAT_MESSAGE_END_SENTINEL)
 
+    # Agent contract: declare deliverables for the current chat. Order is
+    # zip → MD → CSV. When zip_output failed (DEC-6), the zip entry is
+    # omitted but MD + CSV are still declared. R16b's early return skips
+    # this block entirely — no attachments are announced on empty result.
+    attachments = []
+    if zip_path is not None:
+        attachments.append({
+            "path": os.path.abspath(zip_path),
+            "caption": _ATTACHMENT_CAPTIONS["zip"],
+        })
+    attachments.append({
+        "path": os.path.abspath(md_path),
+        "caption": _ATTACHMENT_CAPTIONS["md"],
+    })
+    attachments.append({
+        "path": os.path.abspath(csv_path),
+        "caption": _ATTACHMENT_CAPTIONS["csv"],
+    })
+    writer(CHAT_ATTACHMENTS_PREFIX + json.dumps(
+        {"files": attachments},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ))
+
 
 # =============================================================================
 # Step 8a — write_summary_csv (UTF-8 BOM, None-safe)
