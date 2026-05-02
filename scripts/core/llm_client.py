@@ -293,7 +293,8 @@ class BedrockClient(LLMClient):
             ) from e
 
         self.model_id = model_id or os.environ.get(
-            "BEDROCK_MODEL_ID", "global.anthropic.claude-opus-4-7"
+            "BEDROCK_MODEL_ID",
+            "global.anthropic.claude-sonnet-4-6",  # v5.5 — was opus-4-7
         )
 
     def extract_from_pdf(self, pdf_bytes: bytes, prompt: str) -> str:

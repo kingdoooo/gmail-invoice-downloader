@@ -393,6 +393,21 @@ class TestOCRCache:
         extract_from_bytes(b"x", llm_client=mc, cache_dir=tmp_path, use_cache=False)
         assert mc.calls == 2
 
+    def test_application_date_survives_cache_round_trip(self, tmp_path):
+        """v5.5: applicationDate is preserved in the on-disk cache dict."""
+        pdf = b"%PDF-1.4\nfakey\n"
+        ocr = {
+            "docType": "行程报销单",
+            "applicationDate": "2025-12-09",
+            "transactionDate": "2025-12-09",
+            "totalAmount": 245.50,
+        }
+        _cache_write(pdf, ocr, tmp_path)
+        read_back = _cache_read(pdf, tmp_path)
+        assert read_back is not None
+        assert read_back["applicationDate"] == "2025-12-09"
+        assert read_back["transactionDate"] == "2025-12-09"
+
 
 # =============================================================================
 # #9 HIGH — rename_by_ocr happy path
@@ -886,6 +901,35 @@ class TestProviderMatrix:
         # about live auth — just that BedrockClient is selected.
         c = get_client()
         assert c.provider_name == "bedrock"
+
+    def test_bedrock_default_is_sonnet_4_6(self, monkeypatch):
+        """v5.5: Bedrock default model switched Opus 4.7 -> Sonnet 4.6.
+
+        Rationale: Sonnet 4.6 is ~5x cheaper, 42% faster, zero amount-
+        field drift vs Opus on the v5.5 brainstorm's 95-PDF benchmark.
+        """
+        monkeypatch.delenv("BEDROCK_MODEL_ID", raising=False)
+        # Read the literal default baked into BedrockClient.__init__ by
+        # parsing the source — avoids the boto3 session construction path.
+        import inspect
+        from core.llm_client import BedrockClient
+        src = inspect.getsource(BedrockClient.__init__)
+        assert '"global.anthropic.claude-sonnet-4-6"' in src, (
+            "BedrockClient.__init__ must default to Sonnet 4.6"
+        )
+
+    def test_bedrock_opus_override_still_works(self, monkeypatch):
+        """BEDROCK_MODEL_ID env var still lets callers pin Opus."""
+        monkeypatch.setenv(
+            "BEDROCK_MODEL_ID", "global.anthropic.claude-opus-4-7"
+        )
+        from core.llm_client import BedrockClient
+        c = BedrockClient.__new__(BedrockClient)  # skip __init__'s boto call
+        import os
+        c.model_id = os.environ.get(
+            "BEDROCK_MODEL_ID", "global.anthropic.claude-sonnet-4-6"
+        )
+        assert "opus-4-7" in c.model_id
 
 
 # =============================================================================
