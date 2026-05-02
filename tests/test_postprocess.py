@@ -3381,6 +3381,9 @@ class TestRenameIgnoredBranch:
     def test_weird_email_sanitized(self, tmp_path):
         """sender_email with unusual chars must not break os.rename
         (sanitize_filename handles path separators / NUL / etc.).
+        Pin to the IGNORED branch: without the startswith assertion the
+        test would still pass via the happy path, which also sanitizes
+        and preserves .pdf.
         """
         from postprocess import rename_by_ocr
         pdf = self._setup(tmp_path, "z.pdf")
@@ -3393,5 +3396,46 @@ class TestRenameIgnoredBranch:
         }
         analysis = {"category": "IGNORED", "ocr": {}}
         rename_by_ocr(record, analysis, str(tmp_path))
-        assert os.path.basename(record["path"]).endswith(".pdf")
+        basename = os.path.basename(record["path"])
+        assert basename.startswith("IGNORED_")
+        assert basename.endswith(".pdf")
+        assert os.path.exists(record["path"])
+
+    def test_osrename_failure_degrades_to_unparsed_with_error(self, tmp_path, monkeypatch):
+        """OSError on IGNORED rename must degrade to UNPARSED: file gets
+        UNPARSED_ prefix for visual triage, record.error carries the
+        failure message for write_report_md:727 to render.
+        """
+        from postprocess import rename_by_ocr
+        pdf = self._setup(tmp_path, "original.pdf")
+        record = {
+            "path": str(pdf),
+            "message_id": "msg-fail-001",
+            "sender_email": "billing@termius.com",
+            "merchant": "Termius",
+            "date": "20251112",
+        }
+        analysis = {"category": "IGNORED", "ocr": {"docType": "Invoice"}}
+
+        # Fail the first os.rename (the IGNORED rename), let the
+        # recursive UNPARSED rename through.
+        import postprocess as pp
+        calls = {"n": 0}
+        real_rename = pp.os.rename
+
+        def flaky_rename(src, dst):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise OSError("mocked disk failure")
+            real_rename(src, dst)
+
+        monkeypatch.setattr(pp.os, "rename", flaky_rename)
+        rename_by_ocr(record, analysis, str(tmp_path))
+
+        assert record["category"] == "UNPARSED"
+        assert "IGNORED rename failed" in record.get("error", "")
+        basename = os.path.basename(record["path"])
+        # Degrade must physically rename to UNPARSED_ for visual triage
+        assert basename.startswith("UNPARSED_")
+        assert basename.endswith(".pdf")
         assert os.path.exists(record["path"])

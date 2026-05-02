@@ -406,15 +406,21 @@ def rename_by_ocr(
                 os.rename(old_path, new_path)
                 record["path"] = new_path
             except OSError as e:
-                # Hard-disk / permission error: degrade to UNPARSED so
-                # the record is still visible to the user through the
-                # UNPARSED pipeline. Keeps the three-deliverable set
-                # (report / CSV / zip) self-consistent.
-                record["category"] = "UNPARSED"
-                analysis["error"] = f"IGNORED rename failed: {e}"
-                record["vendor_name"] = record.get("merchant") or "未知"
-                record["transaction_date"] = record.get("date", "")
-                return record
+                # Hard-disk / permission error: degrade the record through
+                # the UNPARSED pipeline so it still reaches the user in
+                # report / CSV / zip. Delegate to a recursive call with a
+                # synthesized UNPARSED analysis so the file actually gets
+                # the UNPARSED_ visible prefix AND the error text is
+                # written to record["error"] where write_report_md reads
+                # it. Writing to the local `analysis["error"]` would lose
+                # the message because the caller does not read it back.
+                err_text = f"IGNORED rename failed: {e}"
+                record["error"] = err_text
+                return rename_by_ocr(
+                    record,
+                    {"category": "UNPARSED", "error": err_text, "ocr": None},
+                    pdfs_dir,
+                )
         record["vendor_name"] = record.get("merchant") or "未知"
         record["transaction_date"] = record.get("date", "")
         return record
