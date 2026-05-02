@@ -966,7 +966,8 @@ class TestDoctorLLMMatrix:
 
         monkeypatch.setenv("LLM_OCR_CONCURRENCY", "50")
         ok, msg = _check_ocr_concurrency()
-        # Warn is returned as ok=True with warn text for this repo's convention
+        assert ok is True
+        assert "WARN:" in msg
         assert "unusually high" in msg or "throttle" in msg
 
 
@@ -2190,6 +2191,27 @@ class TestConcurrencyEnvVar:
         from postprocess import analyze_pdf_batch
         analyze_pdf_batch([], use_llm=False)
         assert captured.get("max_workers") == 5
+
+    def test_cli_does_not_hardcode_max_workers(self):
+        """Regression guard for v5.5 task-5 bug: download-invoices.py must
+        NOT pass max_workers= as a literal to analyze_pdf_batch — it
+        would bypass LLM_OCR_CONCURRENCY. Use the sentinel None default."""
+        import pathlib
+        import re
+        repo_root = pathlib.Path(__file__).resolve().parent.parent
+        src = (repo_root / "scripts" / "download-invoices.py").read_text()
+        # Grab each call's arg region
+        calls = re.findall(
+            r"analyze_pdf_batch\s*\([^)]*?\)",
+            src,
+            re.DOTALL,
+        )
+        assert calls, "could not locate analyze_pdf_batch call — test may be stale"
+        for call in calls:
+            assert "max_workers" not in call, (
+                f"analyze_pdf_batch call hardcodes max_workers; "
+                f"this would bypass LLM_OCR_CONCURRENCY:\n{call}"
+            )
 
 
 # =============================================================================

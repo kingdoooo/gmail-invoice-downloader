@@ -858,8 +858,12 @@ def _run_postprocess_only(
         say("\n--- Step 6: LLM OCR + classify + plausibility ---")
         t0 = time.time()
         try:
+            # max_workers intentionally omitted — reads LLM_OCR_CONCURRENCY env
+            # var, defaults to 5. Set LLM_OCR_CONCURRENCY=2 for Anthropic tier-1.
             analyses = analyze_pdf_batch(
-                records, max_workers=2, use_llm=use_llm, logger=log,
+                records,
+                use_llm=use_llm,
+                logger=log,
             )
         except (LLMAuthError, LLMConfigError) as e:
             say(f"❌ LLM config error: {e}")
@@ -1236,9 +1240,10 @@ def main():
         say("\n--- Step 6: LLM OCR + classify + plausibility ---")
         t0 = time.time()
         try:
+            # max_workers intentionally omitted — reads LLM_OCR_CONCURRENCY env
+            # var, defaults to 5. Set LLM_OCR_CONCURRENCY=2 for Anthropic tier-1.
             analyses = analyze_pdf_batch(
                 downloaded,
-                max_workers=2,
                 use_llm=use_llm,
                 logger=log,
             )

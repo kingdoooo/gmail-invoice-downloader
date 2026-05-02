@@ -268,7 +268,7 @@ Email
 
 ### Step 6 — LLM OCR + 可信度校验（v5.3 新增）
 
-下载完的每张 PDF 送 LLM OCR 提取结构化字段（销售方、日期、金额、确认号等）。ThreadPoolExecutor max_workers=2（环境变量 `LLM_OCR_CONCURRENCY` 覆盖）。指数退避 2s/4s/8s 处理 429/5xx。
+下载完的每张 PDF 送 LLM OCR 提取结构化字段（销售方、日期、金额、确认号等）。ThreadPoolExecutor max_workers=5（可通过 `LLM_OCR_CONCURRENCY` 覆盖；详见上文"LLM OCR 并发控制"节）。指数退避 2s/4s/8s 处理 429/5xx。
 
 **抗幻觉校验**（`scripts/core/validation.py`）：
 - **金额合理性**：用 `pdftotext -layout` 扫 PDF，LLM 金额偏离页面任何数字 >10% → 标 `_amountConfidence: "low"`

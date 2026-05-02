@@ -177,8 +177,8 @@ def _check_ocr_concurrency() -> tuple[bool, str]:
     if n > 20:
         return (
             True,
-            f"LLM_OCR_CONCURRENCY={n} (warn: unusually high; most providers "
-            f"throttle above 10)"
+            f"WARN: LLM_OCR_CONCURRENCY={n} unusually high; most providers "
+            f"throttle above 10"
         )
     return (True, f"LLM_OCR_CONCURRENCY={n}")
 
