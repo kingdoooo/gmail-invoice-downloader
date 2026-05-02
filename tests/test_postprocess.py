@@ -3098,6 +3098,7 @@ class TestPromptContract:
             "Hotel-specific field conditional extraction",
             "subscription period",
             "date due",
+            "Room No.",   # anchor the English positive-trigger half of the rule
             "入离日期",
             "房号",
             "MUST remain `null`",
