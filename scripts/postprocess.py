@@ -1652,6 +1652,7 @@ def zip_output(
     *,
     dest_dir: Optional[str] = None,
     now: Optional[_dt.datetime] = None,
+    include_pdf_paths: Optional[set] = None,
 ) -> str:
     """Create 发票打包_YYYYMMDD-HHMMSS.zip from output_dir.
 
@@ -1661,6 +1662,17 @@ def zip_output(
     - Manifest check: at least 1 CSV + 1 report MD + N PDFs
     - Default dest_dir is the parent of output_dir (so the zip sits alongside it)
 
+    ``include_pdf_paths`` (v5.7.1 fix): when provided, only PDFs whose absolute
+    path is in the set are packaged. This prevents leftover PDFs from previous
+    runs (files accumulated in ``output_dir/pdfs/`` across batches) from
+    leaking into the deliverable zip. Callers pass the union of this run's
+    matching_result + ignored_records + unparsed paths. When None, legacy
+    behavior preserves (scan every .pdf in the tree, minus prefix filters) —
+    keeps existing agent-contract tests and third-party tooling compatible.
+
+    IGNORED_ and 发票打包_ prefix filters still apply even when
+    ``include_pdf_paths`` is set (defense in depth).
+
     Returns the path of the created zip.
     """
     now = now or _dt.datetime.now()
@@ -1669,6 +1681,11 @@ def zip_output(
     zip_name = f"{ZIP_PREFIX}{stamp}.zip"
     final_path = os.path.join(dest_dir, zip_name)
     tmp_path = final_path + ".tmp"
+
+    # Resolve whitelist to absolute paths for safe comparison against os.walk.
+    whitelist_abs: Optional[set] = None
+    if include_pdf_paths is not None:
+        whitelist_abs = {os.path.abspath(p) for p in include_pdf_paths}
 
     pdf_count = csv_count = md_count = 0
 
@@ -1695,6 +1712,13 @@ def zip_output(
                 if os.path.islink(os.path.join(root, fn)):
                     continue
                 fp = os.path.join(root, fn)
+                # v5.7.1 fix: apply include whitelist only to PDFs. CSV/MD
+                # are this-run artifacts by construction (freshly written by
+                # write_report_md / write_summary_csv) — whitelisting them
+                # would force callers to duplicate the writer paths.
+                if suffix == ".pdf" and whitelist_abs is not None:
+                    if os.path.abspath(fp) not in whitelist_abs:
+                        continue
                 arcname = os.path.relpath(fp, output_dir)
                 z.write(fp, arcname)
                 if suffix == ".pdf":

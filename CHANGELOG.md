@@ -2,6 +2,25 @@
 
 本项目的版本声明仅在 `SKILL.md` 第 1 行（`# Gmail Invoice Downloader (vX.Y)`）。下方记录每个版本的发布说明；最新版本在最上面。
 
+## v5.7.1 — zip 跨批次残留修复 (2026-05-03)
+
+**问题**：用户报告 `pdfs/` 里几乎每张票都有一份 `(1)` 后缀的"重复"；zip 包里也有。SHA 对比显示 182 份文件中 89 份与本 run 的 step4 records byte-identical —— 这些是**前几次 run 在同一个 output_dir 下累积的残留文件**。`zip_output` 之前直接 `os.walk(output_dir)` 把所有 `.pdf` 都打包，不区分本 run 产物和跨批次残留，导致 zip 膨胀 + 用户体验困惑。dedup (`_dedup_by_ocr_business_key`) 没有 bug —— 它按设计只在单 run 的 `downloaded` list 内工作，磁盘上的前 run 残留本来就不在它的 scope 里。
+
+- **fix(postprocess):** `zip_output` 新增 keyword `include_pdf_paths: set[str] | None = None`。传入 set 时，只有绝对路径在白名单里的 PDF 会进 zip；其他（跨批次残留）留在磁盘上供审计。`None` 保持原有全扫描行为（向后兼容既有 contract test 和第三方工具）。`IGNORED_` / `发票打包_` 前缀排除仍然独立生效（纵深防御）。CSV / MD **不**被白名单管辖——它们是本 run 现写的产物，白名单化它们会逼 caller 复制 writer 路径毫无意义。
+- **feat(cli):** `main()` 和 `_run_postprocess_only` 现在从 `downloaded_all` / `records` 收集本 run 的 PDF path set 传给 `zip_output(..., include_pdf_paths=...)`。同时新增 `_count_leftover_pdfs` 辅助函数，在 zip 之前输出 `ℹ️ 跨批次残留：pdfs/ 目录里有 N 份 PDF 来自之前的批次，未打包进本次 zip（仍保留在磁盘上供审计）...` 一行，让用户知情并给清理建议。
+- **test(postprocess):** `TestZipAtomic` 新增 4 个测试：白名单生效排除跨 run 残留 / 白名单为 None 保留 legacy 全扫描 / 白名单仍尊重 `IGNORED_` 前缀过滤 / 白名单为空 set 时仅打包 CSV+MD。
+- **test(suite):** 284 passed（v5.7 为 280，+4 新测试）。
+
+### 不受影响
+
+- `missing.json` schema 仍为 `"1.0"`；`CHAT_MESSAGE_*` / `CHAT_ATTACHMENTS` sentinel 契约不变；`_dedup_by_ocr_business_key` 逻辑不变（单 run scope 去重仍按 Pass 1 业务键 + Pass 2 SHA256 正常工作）；`rename_by_ocr` / `build_aggregation` / CATEGORY 登记不变。
+- 既有 `zip_output` 调用者（`TestZipManifestContract` 等）传 `dest_dir` 而不传 `include_pdf_paths`，走 `None`-legacy 分支，行为与 v5.7 完全一致。
+
+### 升级备注
+
+- **已存在的跨批次残留不会自动清理**。用户如果想让 `pdfs/` 也干净，提示行里已经给了命令：`rm {pdfs_dir}/*.pdf` 然后重跑。zip 本身从 v5.7.1 开始保证干净。
+- **未来设计方向**：如果需要"run 开始时自动清空 pdfs/" 的激进行为，单独开议题讨论（涉及到用户手动放 PDF 进 pdfs/ 等副作用场景）。
+
 ## v5.7 — IGNORED 白名单分类 + 非报销票据过滤（双层防御） (2026-05-02)
 
 **动机**：2025Q4 smoke 里 Termius 订阅发票（Stripe 模板 + 英文 docType "Invoice"）被 `is_hotel_folio_by_doctype` 的 "Statement"/"Invoice" 关键字命中，滑入 HOTEL_FOLIO 管道永不匹配，在 `missing.json` 里变成永远修不好的 `hotel_invoice` 缺口；`convergence_hash` 兜底判为 `converged` 是**假收敛**。下一个英文 SaaS 供应商必然再踩同一坑。v5.7 用双层防御从根上切断这条路径。
