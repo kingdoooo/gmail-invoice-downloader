@@ -580,8 +580,8 @@ def write_report_md(
         fallback = [m for m in matched
                     if m.get("match_type") == "date_only (v5.2 fallback)"]
         if primary:
-            lines.append("| 退房日 | 销售方 | 匹配方式 | 水单 | 酒店发票 |")
-            lines.append("|--------|--------|----------|:----:|:--------:|")
+            lines.append("| 退房日 | 销售方 | 匹配方式 | 水单 | 发票 |")
+            lines.append("|--------|--------|----------|:----:|:----:|")
             for m in primary:
                 inv_rec = (m["invoice"].get("_record") or {})
                 fol_rec = (m["folio"].get("_record") or {})

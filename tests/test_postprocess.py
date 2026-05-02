@@ -1321,6 +1321,208 @@ class TestHotelMatchingTiers:
         assert m["folio_departure_date"] == "2025-05-08"
 
 
+class TestWriteReportMdP3Rendering:
+    """v5.5 Task 3: write_report_md renders a dedicated P3 subsection with a
+    dedicated '入住 / 退房 (OCR)' column. Locks in the split-table behavior
+    and the '?' fallback against regression, and confirms the P3 heading is
+    omitted entirely when there are no P3 matches.
+
+    Import approach: scripts/download-invoices.py has a hyphen so plain
+    `import` won't work. We use importlib.util.spec_from_file_location (the
+    same pattern test_agent_contract.py uses) to load the module in-process
+    — much cheaper than spinning up a subprocess per assertion, and we only
+    need the single write_report_md function.
+    """
+
+    @staticmethod
+    def _load_cli_module():
+        import importlib.util
+        scripts_dir = Path(__file__).resolve().parent.parent / "scripts"
+        spec = importlib.util.spec_from_file_location(
+            "download_invoices_cli_p3test",
+            str(scripts_dir / "download-invoices.py"),
+        )
+        assert spec is not None and spec.loader is not None
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["download_invoices_cli_p3test"] = mod
+        spec.loader.exec_module(mod)
+        return mod
+
+    @staticmethod
+    def _make_folio_record(path, hotel, arrival, departure, balance):
+        return {
+            "path": path,
+            "valid": True,
+            "category": "HOTEL_FOLIO",
+            "ocr": {
+                "hotelName": hotel,
+                "arrivalDate": arrival,
+                "departureDate": departure,
+                "transactionDate": departure or "2025-05-08",
+                "balance": balance,
+                "confirmationNo": f"CONF-{path}",
+            },
+            "merchant": hotel,
+        }
+
+    @staticmethod
+    def _make_invoice_record(path, vendor, date, amount):
+        return {
+            "path": path,
+            "valid": True,
+            "category": "HOTEL_INVOICE",
+            "ocr": {
+                "vendorName": vendor,
+                "transactionDate": date,
+                "transactionAmount": amount,
+                "remark": "NOT-A-CONFNO",
+            },
+            "merchant": vendor,
+        }
+
+    def _make_p3_match(self, fol_rec, inv_rec, arrival, departure):
+        """Build a synthetic P3 match dict matching the shape produced by
+        postprocess.do_all_matching + _to_matching_input."""
+        return {
+            "match_type": "date_only (v5.2 fallback)",
+            "confidence": "low",
+            "invoice": {
+                "s3Key": inv_rec["path"],
+                "transactionDate": (inv_rec["ocr"] or {}).get("transactionDate"),
+                "transactionAmount": (inv_rec["ocr"] or {}).get("transactionAmount"),
+                "_record": inv_rec,
+            },
+            "folio": {
+                "s3Key": fol_rec["path"],
+                "checkOutDate": (fol_rec["ocr"] or {}).get("departureDate"),
+                "_record": fol_rec,
+            },
+            "folio_arrival_date": arrival,
+            "folio_departure_date": departure,
+        }
+
+    def _make_p2_match(self, fol_rec, inv_rec):
+        return {
+            "match_type": "date_amount",
+            "confidence": "medium",
+            "invoice": {
+                "s3Key": inv_rec["path"],
+                "transactionDate": (inv_rec["ocr"] or {}).get("transactionDate"),
+                "transactionAmount": (inv_rec["ocr"] or {}).get("transactionAmount"),
+                "_record": inv_rec,
+            },
+            "folio": {
+                "s3Key": fol_rec["path"],
+                "_record": fol_rec,
+            },
+        }
+
+    def test_p3_subsection_renders_ocr_dates_with_question_mark_fallback(
+        self, tmp_path
+    ):
+        cli = self._load_cli_module()
+
+        # Two P3 matches: one with full OCR dates, one with both None →
+        # renderer must emit '?' for the missing side.
+        fol_a = self._make_folio_record(
+            "/tmp/a_folio.pdf", "苏州万豪", "2025-05-07", "2025-05-08", 583.97
+        )
+        inv_a = self._make_invoice_record(
+            "/tmp/a_invoice.pdf", "苏州万豪", "2025-05-08", 605.15
+        )
+        fol_b = self._make_folio_record(
+            "/tmp/b_folio.pdf", "希尔顿北京", None, None, 1200.00
+        )
+        inv_b = self._make_invoice_record(
+            "/tmp/b_invoice.pdf", "希尔顿北京", "2025-06-10", 1200.00
+        )
+
+        matching_result = {
+            "hotel": {
+                "matched": [
+                    self._make_p3_match(fol_a, inv_a, "2025-05-07", "2025-05-08"),
+                    self._make_p3_match(fol_b, inv_b, None, None),
+                ],
+                "unmatched_invoices": [],
+                "unmatched_folios": [],
+            },
+            "ridehailing": {
+                "matched": [], "unmatched_invoices": [], "unmatched_receipts": [],
+            },
+        }
+
+        report_path = tmp_path / "下载报告.md"
+        cli.write_report_md(
+            str(report_path),
+            downloaded_all=[fol_a, inv_a, fol_b, inv_b],
+            failed=[],
+            skipped=[],
+            matching_result=matching_result,
+            date_range=("2025/05/01", "2025/05/31"),
+            iteration=1,
+            supplemental=False,
+            aggregation=None,
+        )
+
+        md = report_path.read_text(encoding="utf-8")
+
+        # P3 heading present
+        assert "### P3 同日兜底匹配（低可信度）" in md
+        # OCR dates column present
+        assert "入住 / 退房 (OCR)" in md
+        # The full-dates row
+        assert "2025-05-07 / 2025-05-08" in md
+        # The missing-dates fallback row renders '? / ?'
+        assert "? / ?" in md
+        # P3 (仅日期) label in the match-type column
+        assert "P3 (仅日期)" in md
+
+    def test_p3_heading_absent_when_no_p3_matches(self, tmp_path):
+        cli = self._load_cli_module()
+
+        fol = self._make_folio_record(
+            "/tmp/c_folio.pdf", "上海万豪", "2025-04-10", "2025-04-12", 900.00
+        )
+        inv = self._make_invoice_record(
+            "/tmp/c_invoice.pdf", "上海万豪", "2025-04-12", 900.00
+        )
+        matching_result = {
+            "hotel": {
+                # Only a P2 match — no P3 rows.
+                "matched": [self._make_p2_match(fol, inv)],
+                "unmatched_invoices": [],
+                "unmatched_folios": [],
+            },
+            "ridehailing": {
+                "matched": [], "unmatched_invoices": [], "unmatched_receipts": [],
+            },
+        }
+
+        report_path = tmp_path / "下载报告.md"
+        cli.write_report_md(
+            str(report_path),
+            downloaded_all=[fol, inv],
+            failed=[],
+            skipped=[],
+            matching_result=matching_result,
+            date_range=("2025/04/01", "2025/04/30"),
+            iteration=1,
+            supplemental=False,
+            aggregation=None,
+        )
+
+        md = report_path.read_text(encoding="utf-8")
+
+        # P3 heading must be absent
+        assert "### P3 同日兜底匹配（低可信度）" not in md
+        # OCR-dates column must be absent
+        assert "入住 / 退房 (OCR)" not in md
+        # Primary P1/P2 table header must be present — sanity check that
+        # the report was actually rendered (uses the v5.5-harmonized '发票'
+        # column header rather than the old '酒店发票').
+        assert "| 退房日 | 销售方 | 匹配方式 | 水单 | 发票 |" in md
+
+
 class TestRideHailingTiebreaker:
     def test_two_same_amount_invoices_pair_to_closest_receipt_by_file_number(self):
         """3 invoices at 139.80 + 2 receipts at 139.80; receipts should pair to
