@@ -74,7 +74,7 @@ def _check_llm_config() -> tuple[bool, str]:
         region = os.environ.get("AWS_REGION", "us-east-1")
         # boto3 1.35.17+ reads AWS_BEARER_TOKEN_BEDROCK (Bedrock API Key).
         if os.environ.get("AWS_BEARER_TOKEN_BEDROCK"):
-            model = os.environ.get("BEDROCK_MODEL_ID", "claude-opus-4-7 (default)")
+            model = os.environ.get("BEDROCK_MODEL_ID", "claude-sonnet-4-6 (default)")
             return True, f"Bedrock via API key (region={region}, model={model})"
         try:
             import boto3
@@ -96,7 +96,7 @@ def _check_llm_config() -> tuple[bool, str]:
                 "export AWS_BEARER_TOKEN_BEDROCK=..., or pass --no-llm."
             )
         method = getattr(creds, "method", "unknown")
-        model = os.environ.get("BEDROCK_MODEL_ID", "claude-opus-4-7 (default)")
+        model = os.environ.get("BEDROCK_MODEL_ID", "claude-sonnet-4-6 (default)")
         return True, f"Bedrock via {method} (region={region}, model={model})"
 
     if provider == "anthropic":

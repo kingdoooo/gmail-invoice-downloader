@@ -664,6 +664,7 @@ class TestMissingJsonSchemaContract:
         "hotel_folio", "hotel_invoice",
         "ridehailing_receipt", "ridehailing_invoice",
         "extraction_failed",
+        "unknown_platform",
     }
 
     def _assert_schema(self, payload: Dict[str, Any]):
@@ -696,7 +697,10 @@ class TestMissingJsonSchemaContract:
         assert payload["status"] == "converged"
 
     def test_all_five_item_types_validate(self, tmp_path):
-        """Construct a payload that exercises all 5 item types at once."""
+        """Construct a payload that exercises the 5 pipeline-produced item
+        types at once. unknown_platform is appended by
+        scripts/record-unknown-platform.py (see TestRecordUnknownPlatform)
+        and is covered separately."""
         missing = tmp_path / "missing.json"
         matching = {
             "hotel": {
@@ -741,8 +745,9 @@ class TestMissingJsonSchemaContract:
         )
         self._assert_schema(payload)
         types_seen = {item["type"] for item in payload["items"]}
-        assert types_seen == self.ALLOWED_ITEM_TYPES, (
-            f"expected all 5 item types, got {types_seen}"
+        expected_pipeline_types = self.ALLOWED_ITEM_TYPES - {"unknown_platform"}
+        assert types_seen == expected_pipeline_types, (
+            f"expected the 5 pipeline-produced item types, got {types_seen}"
         )
 
     def test_missing_json_round_trips_through_disk(self, tmp_path):
