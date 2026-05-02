@@ -23,7 +23,9 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import subprocess
 import sys
+import tempfile
 import zipfile
 from pathlib import Path
 from typing import Any, Dict, List
@@ -662,6 +664,7 @@ class TestMissingJsonSchemaContract:
         "hotel_folio", "hotel_invoice",
         "ridehailing_receipt", "ridehailing_invoice",
         "extraction_failed",
+        "unknown_platform",
     }
 
     def _assert_schema(self, payload: Dict[str, Any]):
@@ -694,7 +697,10 @@ class TestMissingJsonSchemaContract:
         assert payload["status"] == "converged"
 
     def test_all_five_item_types_validate(self, tmp_path):
-        """Construct a payload that exercises all 5 item types at once."""
+        """Construct a payload that exercises the 5 pipeline-produced item
+        types at once. unknown_platform is appended by
+        scripts/record-unknown-platform.py (see TestRecordUnknownPlatform)
+        and is covered separately."""
         missing = tmp_path / "missing.json"
         matching = {
             "hotel": {
@@ -739,8 +745,9 @@ class TestMissingJsonSchemaContract:
         )
         self._assert_schema(payload)
         types_seen = {item["type"] for item in payload["items"]}
-        assert types_seen == self.ALLOWED_ITEM_TYPES, (
-            f"expected all 5 item types, got {types_seen}"
+        expected_pipeline_types = self.ALLOWED_ITEM_TYPES - {"unknown_platform"}
+        assert types_seen == expected_pipeline_types, (
+            f"expected the 5 pipeline-produced item types, got {types_seen}"
         )
 
     def test_missing_json_round_trips_through_disk(self, tmp_path):
@@ -937,3 +944,206 @@ class TestDownloadLinkDedupScope:
             log.close()
 
         assert d == [] and fl == [], "in-run byte-identical duplicate must collapse"
+
+
+# =============================================================================
+# --postprocess-only flag contract — re-run Step 6-10 against existing pdfs/
+# =============================================================================
+
+class TestPostprocessOnlyFlag:
+    """--postprocess-only skips Gmail (Step 1-5) and re-runs OCR + matching
+    + deliverables (Step 6-10) against existing <out>/pdfs/."""
+
+    def test_empty_pdfs_dir_produces_report_and_exits_5(self):
+        """Empty pdfs/ → no crash, writes empty deliverables, exits 5."""
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, "pdfs"))
+            result = subprocess.run(
+                [
+                    "python3", "scripts/download-invoices.py",
+                    "--postprocess-only",
+                    "--output", tmp,
+                    "--no-llm",    # keep test offline
+                ],
+                capture_output=True, text=True,
+            )
+            assert result.returncode == 5, result.stderr
+            assert "REMEDIATION:" in result.stderr
+            # Deliverables exist
+            assert os.path.exists(os.path.join(tmp, "下载报告.md"))
+            assert os.path.exists(os.path.join(tmp, "missing.json"))
+
+    def test_rejects_missing_output_dir(self):
+        """Unknown output dir → exits non-zero with REMEDIATION."""
+        result = subprocess.run(
+            [
+                "python3", "scripts/download-invoices.py",
+                "--postprocess-only",
+                "--output", "/nonexistent/path/xyz",
+                "--no-llm",
+            ],
+            capture_output=True, text=True,
+        )
+        assert result.returncode != 0
+        assert "REMEDIATION:" in result.stderr
+
+    def test_rejects_iteration_with_postprocess_only(self):
+        """--iteration + --postprocess-only → exit non-zero with REMEDIATION."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, "pdfs"))
+            result = subprocess.run(
+                [
+                    "python3", "scripts/download-invoices.py",
+                    "--postprocess-only",
+                    "--iteration", "2",
+                    "--output", tmp,
+                    "--no-llm",
+                ],
+                capture_output=True, text=True,
+            )
+            assert result.returncode != 0
+            assert "REMEDIATION:" in result.stderr
+            assert "--iteration" in result.stderr
+
+    def test_existing_pdfs_dir_rewrites_deliverables(self, monkeypatch, tmp_path):
+        """pdfs/ with one cached-OCR PDF → report + missing.json regenerate."""
+        import shutil
+        fixtures = os.environ.get(
+            "GMAIL_INVOICE_FIXTURES",
+            os.path.expanduser("~/Documents/agent Test/"),
+        )
+        if not os.path.isdir(fixtures):
+            pytest.skip(f"Fixtures dir missing: {fixtures}")
+
+        # Find any sample PDF from fixtures
+        sample = None
+        for root, _dirs, files in os.walk(fixtures):
+            for f in files:
+                if f.lower().endswith(".pdf"):
+                    sample = os.path.join(root, f)
+                    break
+            if sample:
+                break
+        if sample is None:
+            pytest.skip("No PDF in fixtures dir")
+
+        pdfs_dir = tmp_path / "pdfs"
+        pdfs_dir.mkdir()
+        shutil.copy(sample, pdfs_dir / "sample.pdf")
+
+        result = subprocess.run(
+            [
+                "python3", "scripts/download-invoices.py",
+                "--postprocess-only",
+                "--output", str(tmp_path),
+                "--no-llm",
+            ],
+            capture_output=True, text=True,
+        )
+        # With --no-llm the PDF becomes UNPARSED → exit 5
+        assert result.returncode in (0, 5), result.stderr
+        assert os.path.exists(tmp_path / "下载报告.md")
+        missing = json.loads(open(tmp_path / "missing.json").read())
+        assert missing["schema_version"] == "1.0"
+
+
+# =============================================================================
+# record-unknown-platform.py helper — auto-probe loop terminal surface
+# =============================================================================
+
+class TestRecordUnknownPlatform:
+    """scripts/record-unknown-platform.py appends an unknown_platform item
+    and flips missing.json status to user_action_required."""
+
+    def _write_base_missing(self, path):
+        """Write a minimal v1.0 missing.json for the helper to mutate."""
+        base = {
+            "schema_version": "1.0",
+            "generated_at": "2026-05-02T12:00:00+08:00",
+            "iteration": 1,
+            "iteration_cap": 3,
+            "status": "converged",
+            "recommended_next_action": "stop",
+            "convergence_hash": "0" * 16,
+            "batch_dir": os.path.dirname(path),
+            "items": [],
+        }
+        with open(path, "w") as f:
+            json.dump(base, f)
+
+    def test_appends_unknown_platform_item_and_flips_status(self, tmp_path):
+        mpath = tmp_path / "missing.json"
+        self._write_base_missing(mpath)
+
+        result = subprocess.run(
+            [
+                "python3", "scripts/record-unknown-platform.py",
+                "--output", str(tmp_path),
+                "--url", "https://unknown-host.cn/s/abc123",
+                "--email-subject", "发票 2025-04-15",
+                "--email-from", "invoice@unknown-host.cn",
+                "--probe-suggestion", "probe found 3x 302 then HTML",
+            ],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 0, result.stderr
+
+        data = json.loads(mpath.read_text())
+        assert data["status"] == "user_action_required"
+        assert data["recommended_next_action"] == "ask_user"
+        assert len(data["items"]) == 1
+        item = data["items"][0]
+        assert item["type"] == "unknown_platform"
+        assert item["original_url"] == "https://unknown-host.cn/s/abc123"
+        assert item["email_subject"] == "发票 2025-04-15"
+        assert item["email_from"] == "invoice@unknown-host.cn"
+        assert "probe found" in item["probe_suggestion"]
+        # convergence_hash recomputed (not equal to all-zeros sentinel)
+        assert data["convergence_hash"] != "0" * 16
+
+    def test_rejects_missing_file(self, tmp_path):
+        result = subprocess.run(
+            [
+                "python3", "scripts/record-unknown-platform.py",
+                "--output", str(tmp_path),
+                "--url", "https://x.y/z",
+                "--email-subject", "s",
+                "--email-from", "f",
+                "--probe-suggestion", "p",
+            ],
+            capture_output=True, text=True,
+        )
+        assert result.returncode != 0
+        assert "REMEDIATION:" in result.stderr
+
+
+class TestOutOfRangeSchema:
+    def test_out_of_range_items_field_coexists_with_v1_required_fields(
+        self, tmp_path,
+    ):
+        """Schema contract: out_of_range_items is additive to v1.0."""
+        from postprocess import write_missing_json
+        hotel = {
+            "unmatched_folios": [{"_record": {"path": "/x.pdf", "ocr": {
+                "hotelName": "H", "departureDate": "2020-01-01", "balance": 1,
+            }}}],
+        }
+        payload = write_missing_json(
+            str(tmp_path / "m.json"),
+            batch_dir=str(tmp_path), iteration=1,
+            matching_result={"hotel": hotel, "ridehailing": {}},
+            unparsed_records=[],
+            run_start_date="2026/04/01", run_end_date="2026/07/01",
+        )
+        for key in (
+            "schema_version", "generated_at", "iteration", "iteration_cap",
+            "status", "recommended_next_action", "convergence_hash",
+            "batch_dir", "items", "out_of_range_items",
+        ):
+            assert key in payload
+        assert payload["schema_version"] == "1.0"
+        assert payload["status"] in (
+            "converged", "needs_retry", "max_iterations_reached",
+            "user_action_required",
+        )

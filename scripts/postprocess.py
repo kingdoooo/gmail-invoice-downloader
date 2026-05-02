@@ -41,6 +41,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from core.classify import classify_invoice
 from core.llm_client import (
+    LLMConfigError,
     LLMDisabledError,
     LLMError,
     get_client,
@@ -51,7 +52,7 @@ from core.matching import (
     match_hotel_pairs,
     match_ride_hailing_pairs,
 )
-from core.validation import validate_ocr_plausibility
+from core.validation import _parse_ocr_date, validate_ocr_plausibility
 
 
 # =============================================================================
@@ -155,7 +156,7 @@ from invoice_helpers import make_unique_path  # noqa: E402
 def analyze_pdf_batch(
     records: List[Dict[str, Any]],
     *,
-    max_workers: int = 2,
+    max_workers: Optional[int] = None,
     use_llm: bool = True,
     logger: Optional[Any] = None,
 ) -> Dict[str, Dict[str, Any]]:
@@ -164,14 +165,38 @@ def analyze_pdf_batch(
     Args:
         records: list of download records with `path`, `valid`, optional
                  `internal_date` (email internalDate ms).
-        max_workers: ThreadPoolExecutor parallelism. Default 2 is safe for
-                     Anthropic tier-1. Override with env LLM_OCR_CONCURRENCY.
+        max_workers: ThreadPoolExecutor parallelism.
+                     If None: reads env LLM_OCR_CONCURRENCY, defaults to 5.
+                     Explicit kwarg > env var > default.
+                     Bedrock (default provider) has generous concurrency
+                     budgets; 5 is safe. Anthropic tier-1 users should set
+                     LLM_OCR_CONCURRENCY=2 (or a smaller number).
+                     Invalid env var raises LLMConfigError (exit 3) rather
+                     than silently defaulting.
         use_llm: pass False to skip LLM entirely (--no-llm mode).
         logger: optional object with .write or .print for progress output.
 
     Returns:
         {record_path: {ocr, category, city, error, used_fallback}}
     """
+    # v5.5: resolve max_workers from explicit kwarg > env var > default.
+    # Fail fast on invalid env — silent fallback would mask a config typo
+    # (e.g. LLM_OCR_CONCURRENCY=10x) and quietly run at default concurrency.
+    if max_workers is None:
+        env = os.environ.get("LLM_OCR_CONCURRENCY", "").strip()
+        if env:
+            try:
+                parsed = int(env)
+                if parsed < 1:
+                    raise ValueError(f"must be >= 1, got {parsed}")
+                max_workers = parsed
+            except ValueError as e:
+                raise LLMConfigError(
+                    f"invalid LLM_OCR_CONCURRENCY={env!r}: {e}"
+                ) from None
+        else:
+            max_workers = 5
+
     # Construct client once (singleton will cache). Let auth / config errors
     # propagate so the caller can map them to EXIT_LLM_CONFIG with a clear
     # REMEDIATION line. Silent degradation to UNPARSED on auth failure was
@@ -354,7 +379,18 @@ def rename_by_ocr(
         return record
 
     # Happy path: {YYYYMMDD}_{vendor}_{label}.pdf
-    date_str = normalize_date(ocr.get("transactionDate")) or record.get("date", "")
+    # v5.5: HOTEL_FOLIO prefers departureDate over transactionDate. On
+    # fresh OCR (post-v5.5 prompt) the two are equal for folios. On stale
+    # OCR cache the preference keeps the filename tied to checkout, not
+    # check-in, which matches the matcher's actual key.
+    if category == "HOTEL_FOLIO":
+        date_str = (
+            normalize_date(ocr.get("departureDate"))
+            or normalize_date(ocr.get("transactionDate"))
+            or record.get("date", "")
+        )
+    else:
+        date_str = normalize_date(ocr.get("transactionDate")) or record.get("date", "")
     vendor = sanitize_filename(ocr.get("vendorName") or record.get("merchant") or "未知商户")
     label = CATEGORY_LABELS.get(category, "发票")
     new_filename = f"{date_str}_{vendor}_{label}.pdf"
@@ -615,10 +651,21 @@ def do_all_matching(downloaded: List[Dict[str, Any]]) -> Dict[str, Any]:
             inv_date = inv.get("transactionDate")
             fol_checkout = fol.get("checkOutDate") or fol.get("departureDate")
             if inv_date and fol_checkout and inv_date == fol_checkout:
+                # v5.5: expose folio arrival/departure on the P3 match
+                # record so the report writer can render the OCR dates
+                # reviewers actually care about (filename date may be
+                # email-internalDate-derived, potentially weeks off).
+                fol_rec = fol.get("_record") or {}
+                fol_ocr = fol_rec.get("ocr") or {}
                 tier3.append({
                     "invoice": inv, "folio": fol,
                     "match_type": "date_only (v5.2 fallback)",
                     "confidence": "low",
+                    "folio_arrival_date": fol_ocr.get("arrivalDate"),
+                    "folio_departure_date": (
+                        fol_ocr.get("departureDate")
+                        or fol_ocr.get("checkOutDate")
+                    ),
                 })
                 used_fol_idx.add(i)
                 break
@@ -1196,6 +1243,33 @@ def write_summary_csv(path: str, aggregation: Dict[str, Any]) -> int:
 
 MISSING_SCHEMA_VERSION = "1.0"
 DEFAULT_ITERATION_CAP = 3
+REASON_OUT_OF_RANGE = "business_date_out_of_range"
+
+
+def _parse_cli_ymd(s: str) -> Optional[_dt.date]:
+    """Convert CLI-format YYYY/MM/DD or YYYY-MM-DD to a date.
+
+    Returns None on empty or unparseable input. Callers default-in items
+    that can't be evaluated so we never silently drop them.
+    """
+    if not s:
+        return None
+    return _parse_ocr_date(s.replace("/", "-"))
+
+
+def _is_out_of_range(business_date: str, run_start: str, run_end: str) -> bool:
+    """True iff business_date is strictly outside [run_start, run_end).
+
+    Boundary: start inclusive, end exclusive (matches Gmail `before:` semantics
+    used by CLI --end). Default-in on any parse failure — we don't filter
+    items we can't evaluate.
+    """
+    d = _parse_ocr_date(business_date) if business_date else None
+    s = _parse_cli_ymd(run_start)
+    e = _parse_cli_ymd(run_end)
+    if d is None or s is None or e is None:
+        return False
+    return d < s or d >= e
 
 
 def _search_suggestion_for_item(
@@ -1302,6 +1376,8 @@ def write_missing_json(
     matching_result: Dict[str, Any],
     unparsed_records: List[Dict[str, Any]],
     previous_convergence_hash: Optional[str] = None,
+    run_start_date: str = "",     # v5.5 — CLI-format YYYY/MM/DD
+    run_end_date: str = "",       # v5.5 — CLI-format YYYY/MM/DD
 ) -> Dict[str, Any]:
     """Build missing.json from do_all_matching output and write to disk.
 
@@ -1313,6 +1389,10 @@ def write_missing_json(
       - recommended_next_action: run_supplemental | stop | ask_user
       - convergence_hash: sha256(sorted needed_for keys)
       - items: list of missing artifacts with per-item search suggestions
+      - out_of_range_items: additive v5.5 — items whose OCR business_date falls
+        outside [run_start_date, run_end_date). Not counted toward status or
+        convergence_hash — Agents skip these rather than chase into adjacent
+        quarters.
     """
     items: List[Dict[str, Any]] = []
 
@@ -1381,6 +1461,32 @@ def write_missing_json(
             "search_suggestion": None,
         })
 
+    # v5.5 — route cross-quarter items to out_of_range_items[]
+    # Business date by type (item.type describes what's MISSING; the
+    # business date comes from what we HAVE):
+    out_of_range_items: List[Dict[str, Any]] = []
+    kept_items: List[Dict[str, Any]] = []
+    for it in items:
+        if it["type"] in (
+            "hotel_folio",
+            "hotel_invoice",
+            "ridehailing_receipt",
+            "ridehailing_invoice",
+        ):
+            bdate = it.get("expected_date")
+        else:
+            # extraction_failed / unknown_platform / unknown types never filtered
+            bdate = None
+
+        if bdate and _is_out_of_range(bdate, run_start_date, run_end_date):
+            it2 = dict(it)
+            it2["business_date"] = bdate
+            it2["reason"] = REASON_OUT_OF_RANGE
+            out_of_range_items.append(it2)
+        else:
+            kept_items.append(it)
+    items = kept_items
+
     # Convergence + status
     convergence_hash = _compute_convergence_hash(items)
     has_converged_vs_previous = (
@@ -1417,6 +1523,7 @@ def write_missing_json(
         "convergence_hash": convergence_hash,
         "batch_dir": batch_dir,
         "items": items,
+        "out_of_range_items": out_of_range_items,   # v5.5 addition
     }
 
     # Atomic write

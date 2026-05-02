@@ -16,6 +16,10 @@ Modifications from source:
 - helpers.py: NOT copied — contains Concur reimbursement formatters
   (meal-type GUIDs, expense validators) irrelevant to the Gmail aggregation
   use case.
+- prompts.py (v5.5): folio transactionDate=departureDate rule with null fallback;
+  itinerary applicationDate field + rule with null fallback; two new JSON
+  sample blocks (folio + itinerary) with common-field reminder captions.
+  PENDING upstream sync to ~/reimbursement-helper/backend/agent/utils/prompts.py.
 
 Sync: this directory is a snapshot and does NOT auto-update when
 reimbursement-helper changes. To check for drift:

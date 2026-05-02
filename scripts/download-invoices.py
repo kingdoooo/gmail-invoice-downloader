@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Gmail Invoice Downloader — end-to-end CLI (v5.3).
+Gmail Invoice Downloader — end-to-end CLI.
 
 v5.3 upgrade: LLM OCR replaces pdftotext heuristics for invoice field
 extraction. Downstream matching (hotel P1/P2/P3, ride-hailing by amount),
@@ -493,6 +493,7 @@ def write_report_md(
     iteration: int,
     supplemental: bool,
     aggregation=None,
+    out_of_range_items=None,   # v5.5 — skipped cross-quarter items
 ):
     """Emit 下载报告.md reflecting v5.3 matching (P1/P2/P3 + ride-hailing + unparsed)
     and supplemental loop context.
@@ -507,7 +508,7 @@ def write_report_md(
         return sum(1 for d in valid if d.get("category") == cat)
 
     lines = []
-    lines.append("# Gmail 发票下载报告 (v5.3)\n")
+    lines.append("# Gmail 发票下载报告\n")
     lines.append(f"**日期范围**：{date_range[0]} → {date_range[1]}  ")
     lines.append(f"**生成时间**：{now.strftime('%Y-%m-%d %H:%M:%S')} CST  ")
     lines.append(f"**轮次**：iteration={iteration}  "
@@ -571,10 +572,18 @@ def write_report_md(
     matched = hotel.get("matched", [])
     if matched or hotel.get("unmatched_invoices") or hotel.get("unmatched_folios"):
         lines.append("## 🏨 酒店入住配对\n")
-        if matched:
-            lines.append("| 退房日 | 销售方 | 匹配方式 | 水单 | 酒店发票 |")
-            lines.append("|--------|--------|----------|:----:|:--------:|")
-            for m in matched:
+        # v5.5: split P1/P2 (trusted) from P3 (date-only fallback) so P3 can
+        # surface the folio OCR arrival/departure dates reviewers care about.
+        # Filename-derived dates on P3 rows may be email-internalDate-based
+        # and drift weeks from the actual checkout.
+        primary = [m for m in matched
+                   if m.get("match_type") != "date_only (v5.2 fallback)"]
+        fallback = [m for m in matched
+                    if m.get("match_type") == "date_only (v5.2 fallback)"]
+        if primary:
+            lines.append("| 退房日 | 销售方 | 匹配方式 | 水单 | 发票 |")
+            lines.append("|--------|--------|----------|:----:|:----:|")
+            for m in primary:
                 inv_rec = (m["invoice"].get("_record") or {})
                 fol_rec = (m["folio"].get("_record") or {})
                 inv_date = m["invoice"].get("transactionDate") or inv_rec.get("date", "") or "?"
@@ -585,9 +594,25 @@ def write_report_md(
                 type_label = {
                     "remark": "P1 (remark)",
                     "date_amount": "P2 (日期+金额)",
-                    "date_only (v5.2 fallback)": "P3 (仅日期)⚠️",
                 }.get(match_type, match_type)
                 lines.append(f"| {inv_date} | {vendor} | {type_label} | `{fol_name}` | `{inv_name}` |")
+            lines.append("")
+        if fallback:
+            lines.append("### P3 同日兜底匹配（低可信度）\n")
+            lines.append("| 销售方 | 匹配方式 | 入住 / 退房 (OCR) | 水单 | 发票 |")
+            lines.append("|--------|----------|-------------------|:----:|:----:|")
+            for m in fallback:
+                inv_rec = (m["invoice"].get("_record") or {})
+                fol_rec = (m["folio"].get("_record") or {})
+                vendor = (inv_rec.get("ocr") or {}).get("vendorName") or inv_rec.get("merchant", "?")
+                arrival = m.get("folio_arrival_date") or "?"
+                departure = m.get("folio_departure_date") or "?"
+                inv_name = os.path.basename(inv_rec.get("path", ""))
+                fol_name = os.path.basename(fol_rec.get("path", ""))
+                lines.append(
+                    f"| {vendor} | P3 (仅日期)⚠️ | {arrival} / {departure} "
+                    f"| `{fol_name}` | `{inv_name}` |"
+                )
             lines.append("")
         if hotel.get("unmatched_invoices"):
             lines.append(f"### ⚠️ 无水单的酒店发票（{len(hotel['unmatched_invoices'])} 张）\n")
@@ -693,6 +718,24 @@ def write_report_md(
             lines.append(f"- `{os.path.basename(rec.get('path',''))}` — {err[:80]}")
         lines.append("")
 
+    # ── v5.5 跨季度边界项（无需补搜） ──
+    if out_of_range_items:
+        lines.append(
+            f"## ℹ️ 跨季度边界项（无需补搜，{len(out_of_range_items)} 项）\n"
+        )
+        lines.append(
+            f"以下项目的业务日期不在本批次时间范围"
+            f"（{date_range[0]} ~ {date_range[1]}）内，已跳过自动补搜。"
+            f"如需一并报销，请单独跑对应季度的批次。\n"
+        )
+        for orr in out_of_range_items:
+            needed_for = orr.get("needed_for", "?")
+            bdate = orr.get("business_date", "?")
+            merchant = orr.get("expected_merchant") or ""
+            suffix = f" — {merchant}" if merchant else ""
+            lines.append(f"- `{needed_for}`（业务日期 {bdate}）{suffix}")
+        lines.append("")
+
     # ── 补搜建议 ──
     total_missing = (
         len(hotel.get("unmatched_invoices", []))
@@ -747,12 +790,220 @@ def _previous_iteration(output_dir):
         return 0
 
 
+def _run_postprocess_only(
+    *,
+    output_dir: str,
+    use_llm: bool,
+    iteration_cap: int,
+    run_start_date,
+    run_end_date,
+) -> int:
+    """Re-run Step 6-10 against an existing output dir.
+
+    Reads pdfs/ directly (not step4_downloaded.json — that is stale once
+    probe rescues land). Produces fresh three deliverables + zip.
+
+    Returns an exit code (does not sys.exit).
+    """
+    if not os.path.isdir(output_dir):
+        print(
+            f"\nREMEDIATION: --output={output_dir!r} does not exist. "
+            f"Pass a directory that holds an existing pdfs/ subdirectory.",
+            file=sys.stderr,
+        )
+        return EXIT_UNKNOWN
+
+    pdfs_dir = os.path.join(output_dir, "pdfs")
+    os.makedirs(pdfs_dir, exist_ok=True)
+
+    # Open run.log in append mode so we chain onto the original fetch's log
+    log_path = os.path.join(output_dir, "run.log")
+    log = open(log_path, "a")
+    import atexit as _atexit
+    _atexit.register(lambda f=log: (f.flush(), f.close()) if not f.closed else None)
+
+    def say(msg):
+        print(msg)
+        print(msg, file=log, flush=True)
+
+    iteration = _previous_iteration(output_dir) + 1
+    say("=" * 70)
+    say(f"Gmail Invoice Downloader — POSTPROCESS-ONLY iteration={iteration}")
+    say(f"Run started @ {datetime.datetime.now(CST).strftime('%Y-%m-%d %H:%M:%S')} CST")
+    say("=" * 70)
+    say(f"LLM provider: {os.environ.get('LLM_PROVIDER', 'bedrock')}"
+        + (" [disabled]" if not use_llm else ""))
+
+    # Build synthetic records from pdfs/ — Step 6 forward works off `path`
+    # + `valid` + optional `internal_date`.
+    records = []
+    for fname in sorted(os.listdir(pdfs_dir)):
+        if not fname.lower().endswith(".pdf"):
+            continue
+        records.append({
+            "path": os.path.join(pdfs_dir, fname),
+            "valid": True,
+            "method": "POSTPROCESS_ONLY",
+            "merchant": None,
+            "date": None,
+            "doc_type": "UNKNOWN",
+            "message_id": fname,
+            "subject": fname,
+            "internal_date": None,
+        })
+    say(f"Found {len(records)} PDF(s) in {pdfs_dir}")
+
+    # --- Step 6: OCR ---
+    if use_llm and records:
+        say("\n--- Step 6: LLM OCR + classify + plausibility ---")
+        t0 = time.time()
+        try:
+            # max_workers intentionally omitted — reads LLM_OCR_CONCURRENCY env
+            # var, defaults to 5. Set LLM_OCR_CONCURRENCY=2 for Anthropic tier-1.
+            analyses = analyze_pdf_batch(
+                records,
+                use_llm=use_llm,
+                logger=log,
+            )
+        except (LLMAuthError, LLMConfigError) as e:
+            say(f"❌ LLM config error: {e}")
+            print(f"\nREMEDIATION: {e}", file=sys.stderr)
+            log.close()
+            return EXIT_LLM_CONFIG
+        say(f"  OCR done for {len(analyses)} files in {time.time()-t0:.1f}s")
+
+        # --- Step 7: rename by OCR ---
+        say("\n--- Step 7: rename files by OCR ---")
+        renamed = 0
+        for rec in records:
+            analysis = analyses.get(rec.get("path")) or {}
+            old_name = os.path.basename(rec.get("path", ""))
+            rename_by_ocr(rec, analysis, pdfs_dir)
+            new_name = os.path.basename(rec.get("path", ""))
+            if new_name != old_name:
+                renamed += 1
+        say(f"  renamed {renamed}/{len(records)} files")
+    else:
+        say("\n--- Step 6+7: skipped (LLM disabled or no PDFs) ---")
+        for rec in records:
+            rec["category"] = "UNPARSED"
+            rec["ocr"] = None
+
+    # --- Step 8: matching ---
+    say("\n--- Step 8: matching ---")
+    matching_result = do_all_matching(records)
+
+    # --- Step 8.5: aggregation ---
+    dedup_removed_ids = {id(r) for r in matching_result.get("dedup_removed", [])}
+    valid_records = [
+        d for d in records
+        if d.get("valid") and id(d) not in dedup_removed_ids
+    ]
+    aggregation = build_aggregation(matching_result, valid_records)
+
+    # --- Step 9c: missing.json (computed first so report can render
+    #     out_of_range_items[] subsection) ---
+    missing_path = os.path.join(output_dir, "missing.json")
+    prev_hash = _previous_convergence_hash(output_dir)
+    missing_payload = write_missing_json(
+        missing_path,
+        batch_dir=output_dir,
+        iteration=iteration,
+        iteration_cap=iteration_cap,
+        matching_result=matching_result,
+        unparsed_records=matching_result.get("unparsed", []),
+        previous_convergence_hash=prev_hash,
+        run_start_date=run_start_date,    # v5.5 — cross-quarter routing
+        run_end_date=run_end_date,
+    )
+
+    # --- Step 9a: 下载报告.md ---
+    report_path = os.path.join(output_dir, "下载报告.md")
+    write_report_md(
+        report_path,
+        downloaded_all=records,
+        failed=[],
+        skipped=[],
+        matching_result=matching_result,
+        date_range=(run_start_date or "?", run_end_date or "?"),
+        iteration=iteration,
+        supplemental=False,
+        aggregation=aggregation,
+        out_of_range_items=missing_payload.get("out_of_range_items", []),
+    )
+    say(f"\n✅ Report:   {report_path}")
+
+    # --- Step 9b: 发票汇总.csv ---
+    csv_path = os.path.join(output_dir, "发票汇总.csv")
+    n_csv = write_summary_csv(csv_path, aggregation)
+    say(f"✅ CSV:      {csv_path}  ({n_csv} rows)")
+    say(f"✅ missing.json: {missing_path}  "
+        f"(status={missing_payload['status']}, "
+        f"next={missing_payload['recommended_next_action']}, "
+        f"items={len(missing_payload['items'])})")
+
+    # --- Step 10: zip ---
+    zip_path = None
+    try:
+        zip_path = zip_output(output_dir)
+        say(f"✅ Zip:      {zip_path}")
+    except RuntimeError as e:
+        say(f"⚠️  zip skipped: {e}")
+
+    # --- Step 11: OpenClaw chat summary (stdout + run.log). MUST be called
+    #     before log.close() — writer=say dual-writes to the still-open log.
+    #     Mirrors main()'s Step 11 call so auto-probe rescues don't silently
+    #     drop the v5.4 aggregated chat summary.
+    say("")
+    print_openclaw_summary(
+        aggregation,
+        output_dir=output_dir,
+        zip_path=zip_path,
+        csv_path=csv_path,
+        md_path=report_path,
+        log_path=log_path,
+        missing_status=missing_payload["recommended_next_action"],
+        date_range=(run_start_date or "?", run_end_date or "?"),
+        writer=say,
+    )
+
+    # --- Exit semantics ---
+    if not records:
+        print(
+            "\nREMEDIATION: no PDFs found in pdfs/. Nothing to postprocess. "
+            "Run a normal Gmail fetch first or add PDFs manually.",
+            file=sys.stderr,
+        )
+        log.close()
+        return EXIT_PARTIAL
+
+    hotel = matching_result.get("hotel", {})
+    rh = matching_result.get("ridehailing", {})
+    unparsed = matching_result.get("unparsed", [])
+    if (unparsed or hotel.get("unmatched_invoices") or hotel.get("unmatched_folios")
+            or rh.get("unmatched_invoices") or rh.get("unmatched_receipts")):
+        print(
+            "\nREMEDIATION: partial result — inspect missing.json for items "
+            "needing follow-up (run_supplemental, probe, or user action).",
+            file=sys.stderr,
+        )
+        log.close()
+        return EXIT_PARTIAL
+
+    log.close()
+    return EXIT_OK
+
+
 def main():
     ap = argparse.ArgumentParser(
-        description="Gmail Invoice Downloader v5.3 — search, download, OCR, match, report.",
+        description="Gmail Invoice Downloader — search, download, OCR, match, report.",
     )
-    ap.add_argument("--start", required=True, help="Gmail date: 2026/01/01")
-    ap.add_argument("--end", required=True, help="Gmail date (exclusive): 2026/05/01")
+    # --start / --end are required for normal runs. In --postprocess-only mode
+    # (Step 6-10 only, no Gmail) the date range is irrelevant; we check + enforce
+    # the non-postprocess-only case manually below so argparse doesn't reject
+    # the agent's probe-rescue invocation.
+    ap.add_argument("--start", required=False, help="Gmail date: 2026/01/01")
+    ap.add_argument("--end", required=False, help="Gmail date (exclusive): 2026/05/01")
     ap.add_argument("--output", required=True, help="Output directory")
     ap.add_argument("--creds", default=DEFAULT_CREDS)
     ap.add_argument("--token", default=DEFAULT_TOKEN)
@@ -768,6 +1019,15 @@ def main():
                     help="Max loop iterations before status=max_iterations_reached.")
     ap.add_argument("--query", default=None,
                     help="Override default INVOICE_KEYWORDS (supplemental narrow search).")
+    ap.add_argument(
+        "--postprocess-only",
+        action="store_true",
+        help=(
+            "Skip Gmail search/download (Step 1-5). Re-run OCR + matching + "
+            "deliverables (Step 6-10) against existing <output>/pdfs/. Use "
+            "after curling a rescued PDF into pdfs/ (see SKILL.md auto-probe)."
+        ),
+    )
 
     # v5.3 LLM provider flags
     ap.add_argument("--no-llm", action="store_true",
@@ -791,6 +1051,41 @@ def main():
                     help="Skip doctor.py preflight checks (not recommended).")
 
     args = ap.parse_args()
+
+    # Enforce --start / --end outside --postprocess-only (they were declared
+    # non-required so the postprocess-only path stays ergonomic, but the Gmail
+    # flow genuinely requires them).
+    if not args.postprocess_only and (not args.start or not args.end):
+        print(
+            "\nREMEDIATION: --start and --end are required for normal runs. "
+            "Pass --postprocess-only to skip Gmail and re-run Step 6-10 against "
+            "existing <output>/pdfs/.",
+            file=sys.stderr,
+        )
+        sys.exit(EXIT_UNKNOWN)
+
+    # --- --postprocess-only: skip Gmail (Step 1-5), just redo Step 6-10 ---
+    if args.postprocess_only:
+        if args.iteration is not None:
+            print(
+                "\nREMEDIATION: --iteration is not supported with "
+                "--postprocess-only. The iteration number is auto-derived "
+                "from the existing missing.json in --output. Drop --iteration.",
+                file=sys.stderr,
+            )
+            sys.exit(EXIT_UNKNOWN)
+        # Propagate --no-llm / --llm-provider to env so the singleton picks it up.
+        if args.no_llm:
+            os.environ["LLM_PROVIDER"] = "none"
+        elif args.llm_provider:
+            os.environ["LLM_PROVIDER"] = args.llm_provider
+        sys.exit(_run_postprocess_only(
+            output_dir=os.path.expanduser(args.output),
+            use_llm=(os.environ.get("LLM_PROVIDER", "bedrock") != "none"),
+            iteration_cap=args.iteration_cap,
+            run_start_date=args.start,
+            run_end_date=args.end,
+        ))
 
     # --- Preflight ---
     if not args.skip_preflight:
@@ -838,7 +1133,7 @@ def main():
 
     say("=" * 70)
     mode = "SUPPLEMENTAL" if args.supplemental else "INITIAL"
-    say(f"Gmail Invoice Downloader v5.3 — {mode} iteration={iteration}")
+    say(f"Gmail Invoice Downloader — {mode} iteration={iteration}")
     say(f"Run started @ {datetime.datetime.now(CST).strftime('%Y-%m-%d %H:%M:%S')} CST")
     say("=" * 70)
     say(f"Date range: {args.start} → {args.end}")
@@ -945,9 +1240,10 @@ def main():
         say("\n--- Step 6: LLM OCR + classify + plausibility ---")
         t0 = time.time()
         try:
+            # max_workers intentionally omitted — reads LLM_OCR_CONCURRENCY env
+            # var, defaults to 5. Set LLM_OCR_CONCURRENCY=2 for Anthropic tier-1.
             analyses = analyze_pdf_batch(
                 downloaded,
-                max_workers=2,
                 use_llm=use_llm,
                 logger=log,
             )
@@ -1022,25 +1318,8 @@ def main():
     ]
     aggregation = build_aggregation(matching_result, valid_records)
 
-    # --- Step 9a: write 下载报告.md ---
-    report_path = os.path.join(output_dir, "下载报告.md")
-    write_report_md(
-        report_path,
-        downloaded_all=downloaded_all, failed=failed, skipped=skipped,
-        matching_result=matching_result,
-        date_range=(args.start, args.end),
-        iteration=iteration,
-        supplemental=args.supplemental,
-        aggregation=aggregation,
-    )
-    say(f"\n✅ Report:   {report_path}")
-
-    # --- Step 9b: write 发票汇总.csv ---
-    csv_path = os.path.join(output_dir, "发票汇总.csv")
-    n_csv = write_summary_csv(csv_path, aggregation)
-    say(f"✅ CSV:      {csv_path}  ({n_csv} rows)")
-
-    # --- Step 9c: write missing.json ---
+    # --- Step 9c: write missing.json (first, so report can render
+    #     out_of_range_items[] subsection) ---
     missing_path = os.path.join(output_dir, "missing.json")
     prev_hash = _previous_convergence_hash(output_dir)
     missing_payload = write_missing_json(
@@ -1051,7 +1330,28 @@ def main():
         matching_result=matching_result,
         unparsed_records=matching_result.get("unparsed", []),
         previous_convergence_hash=prev_hash,
+        run_start_date=args.start,    # v5.5 — cross-quarter routing
+        run_end_date=args.end,
     )
+
+    # --- Step 9a: write 下载报告.md ---
+    report_path = os.path.join(output_dir, "下载报告.md")
+    write_report_md(
+        report_path,
+        downloaded_all=downloaded_all, failed=failed, skipped=skipped,
+        matching_result=matching_result,
+        date_range=(args.start, args.end),
+        iteration=iteration,
+        supplemental=args.supplemental,
+        aggregation=aggregation,
+        out_of_range_items=missing_payload.get("out_of_range_items", []),
+    )
+    say(f"\n✅ Report:   {report_path}")
+
+    # --- Step 9b: write 发票汇总.csv ---
+    csv_path = os.path.join(output_dir, "发票汇总.csv")
+    n_csv = write_summary_csv(csv_path, aggregation)
+    say(f"✅ CSV:      {csv_path}  ({n_csv} rows)")
     say(f"✅ missing.json: {missing_path}  "
         f"(status={missing_payload['status']}, next={missing_payload['recommended_next_action']}, "
         f"items={len(missing_payload['items'])})")

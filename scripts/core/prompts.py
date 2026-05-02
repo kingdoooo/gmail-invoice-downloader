@@ -77,6 +77,14 @@ def get_ocr_prompt() -> str:
 | city | string | 城市名（可能是英文如 "WUXI"） |
 | roomNumber | string | 房间号 |
 
+**⚠️ transactionDate 取值规则（酒店水单）：**
+
+统一使用 **departureDate（退房日）** 作为 transactionDate。
+理由：退房日是住宿服务完成的日期，与发票开票日对齐，是 P2 匹配依赖的字段。
+不要取 arrivalDate、check-in、room charge date 等其他日期。
+
+若 departureDate 无法识别（水单残缺或信息缺失），则 transactionDate 填 null，不要猜测或用 arrivalDate 代替。
+
 ## 网约车发票专用字段
 
 | 字段名 | 类型 | 说明 |
@@ -87,9 +95,18 @@ def get_ocr_prompt() -> str:
 
 | 字段名 | 类型 | 说明 |
 |--------|------|------|
+| applicationDate | string | 申请日期（行程单专用），从表头「申请日期：YYYY-MM-DD」提取 |
 | totalAmount | number | 合计金额 |
 | tripCount | number | 行程数量 |
 | city | string | 从表格"城市"列提取，去掉"市"后缀 |
+
+**⚠️ transactionDate 取值规则（行程单）：**
+
+将 applicationDate 同时填入 transactionDate。
+理由：申请日期是行程单的结算时间点，与对应发票的开票日期最接近。
+不要取各笔行程的上车时间（不同行程日期不同），也不要取行程起止范围的任一端点。
+
+若 applicationDate 无法识别，applicationDate 和 transactionDate 都填 null，不要用行程起止范围猜测。
 
 行程单表格示例：
 ```
@@ -142,6 +159,34 @@ def get_ocr_prompt() -> str:
   "serviceType": "*餐饮服务*餐饮费",
   "docType": "电子发票（普通发票）",
   "isChineseInvoice": true
+}
+```
+
+**酒店水单示例**（注意 transactionDate == departureDate；仍需按通用字段表提取 transactionAmount、vendorName、vendorTaxId 等）：
+
+```json
+{
+  "docType": "Guest Folio",
+  "hotelName": "苏州万豪酒店",
+  "arrivalDate": "2025-05-07",
+  "departureDate": "2025-05-08",
+  "transactionDate": "2025-05-08",
+  "balance": 583.97,
+  "confirmationNo": "4329092847491260840"
+}
+```
+
+**网约车行程单示例**（注意 transactionDate == applicationDate；仍需按通用字段表提取 transactionAmount、vendorName、docType 等）：
+
+```json
+{
+  "docType": "行程报销单",
+  "vendorName": "滴滴出行",
+  "applicationDate": "2025-12-09",
+  "transactionDate": "2025-12-09",
+  "totalAmount": 245.50,
+  "tripCount": 12,
+  "city": "南京"
 }
 ```
 

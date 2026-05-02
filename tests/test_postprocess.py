@@ -393,6 +393,21 @@ class TestOCRCache:
         extract_from_bytes(b"x", llm_client=mc, cache_dir=tmp_path, use_cache=False)
         assert mc.calls == 2
 
+    def test_application_date_survives_cache_round_trip(self, tmp_path):
+        """v5.5: applicationDate is preserved in the on-disk cache dict."""
+        pdf = b"%PDF-1.4\nfakey\n"
+        ocr = {
+            "docType": "行程报销单",
+            "applicationDate": "2025-12-09",
+            "transactionDate": "2025-12-09",
+            "totalAmount": 245.50,
+        }
+        _cache_write(pdf, ocr, tmp_path)
+        read_back = _cache_read(pdf, tmp_path)
+        assert read_back is not None
+        assert read_back["applicationDate"] == "2025-12-09"
+        assert read_back["transactionDate"] == "2025-12-09"
+
 
 # =============================================================================
 # #9 HIGH — rename_by_ocr happy path
@@ -435,6 +450,76 @@ class TestRenameHappyPath:
         assert basename.startswith("UNPARSED_")
         assert basename.endswith(".pdf")
         assert result["category"] == "UNPARSED"
+
+
+class TestRenameByOCRFolioDate:
+    """v5.5: HOTEL_FOLIO rename prefers OCR departureDate over
+    internalDate-derived filename. Other categories unchanged."""
+
+    def test_folio_uses_departure_date_when_present(self, tmp_path):
+        pdfs = tmp_path / "pdfs"
+        pdfs.mkdir()
+        src = pdfs / "original.pdf"
+        src.write_bytes(b"%PDF-1.4\n...")
+        record = {
+            "path": str(src),
+            "message_id": "msg123",
+            "merchant": "苏州万豪",
+            "date": "20250607",   # internalDate-derived, *not* to be used
+        }
+        analysis = {
+            "ocr": {
+                "transactionDate": "2025-05-07",  # check-in (arrivalDate)
+                "departureDate": "2025-05-08",    # check-out (v5.5 canonical)
+                "vendorName": "苏州万豪",
+            },
+            "category": "HOTEL_FOLIO",
+        }
+        rename_by_ocr(record, analysis, str(pdfs))
+        assert os.path.basename(record["path"]).startswith("20250508_"), \
+            f"Expected departureDate 20250508, got {record['path']}"
+
+    def test_folio_falls_back_to_transaction_date_when_departure_missing(
+        self, tmp_path,
+    ):
+        pdfs = tmp_path / "pdfs"
+        pdfs.mkdir()
+        src = pdfs / "original.pdf"
+        src.write_bytes(b"%PDF-1.4\n...")
+        record = {
+            "path": str(src),
+            "message_id": "msg123",
+            "merchant": "X",
+            "date": "20250101",
+        }
+        analysis = {
+            "ocr": {
+                "transactionDate": "2025-05-07",
+                "departureDate": None,
+                "vendorName": "X",
+            },
+            "category": "HOTEL_FOLIO",
+        }
+        rename_by_ocr(record, analysis, str(pdfs))
+        assert os.path.basename(record["path"]).startswith("20250507_")
+
+    def test_hotel_invoice_unaffected(self, tmp_path):
+        """HOTEL_INVOICE keeps v5.3 behavior: uses transactionDate."""
+        pdfs = tmp_path / "pdfs"
+        pdfs.mkdir()
+        src = pdfs / "original.pdf"
+        src.write_bytes(b"%PDF-1.4\n...")
+        record = {"path": str(src), "message_id": "x", "merchant": "Y", "date": ""}
+        analysis = {
+            "ocr": {
+                "transactionDate": "2025-05-08",
+                "departureDate": "2025-05-10",   # should be ignored for invoices
+                "vendorName": "Y",
+            },
+            "category": "HOTEL_INVOICE",
+        }
+        rename_by_ocr(record, analysis, str(pdfs))
+        assert os.path.basename(record["path"]).startswith("20250508_")
 
 
 # =============================================================================
@@ -817,6 +902,35 @@ class TestProviderMatrix:
         c = get_client()
         assert c.provider_name == "bedrock"
 
+    def test_bedrock_default_is_sonnet_4_6(self, monkeypatch):
+        """v5.5: Bedrock default model switched Opus 4.7 -> Sonnet 4.6.
+
+        Rationale: Sonnet 4.6 is ~5x cheaper, 42% faster, zero amount-
+        field drift vs Opus on the v5.5 brainstorm's 95-PDF benchmark.
+        """
+        monkeypatch.delenv("BEDROCK_MODEL_ID", raising=False)
+        # Read the literal default baked into BedrockClient.__init__ by
+        # parsing the source — avoids the boto3 session construction path.
+        import inspect
+        from core.llm_client import BedrockClient
+        src = inspect.getsource(BedrockClient.__init__)
+        assert '"global.anthropic.claude-sonnet-4-6"' in src, (
+            "BedrockClient.__init__ must default to Sonnet 4.6"
+        )
+
+    def test_bedrock_opus_override_still_works(self, monkeypatch):
+        """BEDROCK_MODEL_ID env var still lets callers pin Opus."""
+        monkeypatch.setenv(
+            "BEDROCK_MODEL_ID", "global.anthropic.claude-opus-4-7"
+        )
+        from core.llm_client import BedrockClient
+        c = BedrockClient.__new__(BedrockClient)  # skip __init__'s boto call
+        import os
+        c.model_id = os.environ.get(
+            "BEDROCK_MODEL_ID", "global.anthropic.claude-sonnet-4-6"
+        )
+        assert "opus-4-7" in c.model_id
+
 
 # =============================================================================
 # Doctor LLM check matrix (offline — no live API call)
@@ -879,6 +993,26 @@ class TestDoctorLLMMatrix:
         monkeypatch.setenv("LLM_PROVIDER", "claude-desktop")
         ok, msg = self._check()
         assert not ok and "Unknown LLM_PROVIDER" in msg
+
+    def test_doctor_concurrency_env(self, monkeypatch):
+        from doctor import _check_ocr_concurrency   # v5.5 new function
+        monkeypatch.delenv("LLM_OCR_CONCURRENCY", raising=False)
+        ok, msg = _check_ocr_concurrency()
+        assert ok is True and "default=5" in msg
+
+        monkeypatch.setenv("LLM_OCR_CONCURRENCY", "3")
+        ok, msg = _check_ocr_concurrency()
+        assert ok is True and "LLM_OCR_CONCURRENCY=3" in msg
+
+        monkeypatch.setenv("LLM_OCR_CONCURRENCY", "abc")
+        ok, msg = _check_ocr_concurrency()
+        assert ok is False and "REMEDIATION" in msg
+
+        monkeypatch.setenv("LLM_OCR_CONCURRENCY", "50")
+        ok, msg = _check_ocr_concurrency()
+        assert ok is True
+        assert "WARN:" in msg
+        assert "unusually high" in msg or "throttle" in msg
 
 
 # =============================================================================
@@ -1204,6 +1338,254 @@ class TestHotelMatchingTiers:
         assert len(result["hotel"]["unmatched_invoices"]) == 1
         assert len(result["hotel"]["unmatched_folios"]) == 1
 
+    def test_p3_match_carries_folio_arrival_and_departure(self):
+        """v5.5: P3 fallback records folio OCR dates so report can render
+        the actual checkout date reviewers care about (not the filename-
+        derived internalDate which may be weeks off)."""
+        records = [
+            # folio — email internalDate 2025-06-07 (later), OCR says 5/7→5/8
+            {
+                "path": "/tmp/a_folio.pdf",
+                "valid": True,
+                "category": "HOTEL_FOLIO",
+                "ocr": {
+                    "hotelName": "苏州万豪",
+                    "arrivalDate": "2025-05-07",
+                    "departureDate": "2025-05-08",
+                    "transactionDate": "2025-05-08",
+                    "balance": 583.97,
+                    "confirmationNo": "4329092847491260840",
+                },
+                "vendor_name": "苏州万豪",
+                "transaction_date": "20250508",
+            },
+            # invoice — OCR date 5/8, amount different (P2 miss), remark
+            # doesn't match confirmationNo (P1 miss).
+            {
+                "path": "/tmp/b_invoice.pdf",
+                "valid": True,
+                "category": "HOTEL_INVOICE",
+                "ocr": {
+                    "vendorName": "苏州万豪",
+                    "transactionDate": "2025-05-08",
+                    "transactionAmount": 605.15,
+                    "remark": "96978435",
+                },
+                "vendor_name": "苏州万豪",
+                "transaction_date": "20250508",
+            },
+        ]
+        result = do_all_matching(records)
+        hotel_matches = result["hotel"].get("matched", [])
+        # Find the P3 pair
+        p3 = [m for m in hotel_matches if m.get("match_type", "").startswith("date_only")]
+        assert len(p3) == 1
+        m = p3[0]
+        assert m["folio_arrival_date"] == "2025-05-07"
+        assert m["folio_departure_date"] == "2025-05-08"
+
+
+class TestWriteReportMdP3Rendering:
+    """v5.5 Task 3: write_report_md renders a dedicated P3 subsection with a
+    dedicated '入住 / 退房 (OCR)' column. Locks in the split-table behavior
+    and the '?' fallback against regression, and confirms the P3 heading is
+    omitted entirely when there are no P3 matches.
+
+    Import approach: scripts/download-invoices.py has a hyphen so plain
+    `import` won't work. We use importlib.util.spec_from_file_location (the
+    same pattern test_agent_contract.py uses) to load the module in-process
+    — much cheaper than spinning up a subprocess per assertion, and we only
+    need the single write_report_md function.
+    """
+
+    @staticmethod
+    def _load_cli_module():
+        import importlib.util
+        scripts_dir = Path(__file__).resolve().parent.parent / "scripts"
+        spec = importlib.util.spec_from_file_location(
+            "download_invoices_cli_p3test",
+            str(scripts_dir / "download-invoices.py"),
+        )
+        assert spec is not None and spec.loader is not None
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["download_invoices_cli_p3test"] = mod
+        spec.loader.exec_module(mod)
+        return mod
+
+    @staticmethod
+    def _make_folio_record(path, hotel, arrival, departure, balance):
+        return {
+            "path": path,
+            "valid": True,
+            "category": "HOTEL_FOLIO",
+            "ocr": {
+                "hotelName": hotel,
+                "arrivalDate": arrival,
+                "departureDate": departure,
+                "transactionDate": departure or "2025-05-08",
+                "balance": balance,
+                "confirmationNo": f"CONF-{path}",
+            },
+            "merchant": hotel,
+        }
+
+    @staticmethod
+    def _make_invoice_record(path, vendor, date, amount):
+        return {
+            "path": path,
+            "valid": True,
+            "category": "HOTEL_INVOICE",
+            "ocr": {
+                "vendorName": vendor,
+                "transactionDate": date,
+                "transactionAmount": amount,
+                "remark": "NOT-A-CONFNO",
+            },
+            "merchant": vendor,
+        }
+
+    def _make_p3_match(self, fol_rec, inv_rec, arrival, departure):
+        """Build a synthetic P3 match dict matching the shape produced by
+        postprocess.do_all_matching + _to_matching_input."""
+        return {
+            "match_type": "date_only (v5.2 fallback)",
+            "confidence": "low",
+            "invoice": {
+                "s3Key": inv_rec["path"],
+                "transactionDate": (inv_rec["ocr"] or {}).get("transactionDate"),
+                "transactionAmount": (inv_rec["ocr"] or {}).get("transactionAmount"),
+                "_record": inv_rec,
+            },
+            "folio": {
+                "s3Key": fol_rec["path"],
+                "checkOutDate": (fol_rec["ocr"] or {}).get("departureDate"),
+                "_record": fol_rec,
+            },
+            "folio_arrival_date": arrival,
+            "folio_departure_date": departure,
+        }
+
+    def _make_p2_match(self, fol_rec, inv_rec):
+        return {
+            "match_type": "date_amount",
+            "confidence": "medium",
+            "invoice": {
+                "s3Key": inv_rec["path"],
+                "transactionDate": (inv_rec["ocr"] or {}).get("transactionDate"),
+                "transactionAmount": (inv_rec["ocr"] or {}).get("transactionAmount"),
+                "_record": inv_rec,
+            },
+            "folio": {
+                "s3Key": fol_rec["path"],
+                "_record": fol_rec,
+            },
+        }
+
+    def test_p3_subsection_renders_ocr_dates_with_question_mark_fallback(
+        self, tmp_path
+    ):
+        cli = self._load_cli_module()
+
+        # Two P3 matches: one with full OCR dates, one with both None →
+        # renderer must emit '?' for the missing side.
+        fol_a = self._make_folio_record(
+            "/tmp/a_folio.pdf", "苏州万豪", "2025-05-07", "2025-05-08", 583.97
+        )
+        inv_a = self._make_invoice_record(
+            "/tmp/a_invoice.pdf", "苏州万豪", "2025-05-08", 605.15
+        )
+        fol_b = self._make_folio_record(
+            "/tmp/b_folio.pdf", "希尔顿北京", None, None, 1200.00
+        )
+        inv_b = self._make_invoice_record(
+            "/tmp/b_invoice.pdf", "希尔顿北京", "2025-06-10", 1200.00
+        )
+
+        matching_result = {
+            "hotel": {
+                "matched": [
+                    self._make_p3_match(fol_a, inv_a, "2025-05-07", "2025-05-08"),
+                    self._make_p3_match(fol_b, inv_b, None, None),
+                ],
+                "unmatched_invoices": [],
+                "unmatched_folios": [],
+            },
+            "ridehailing": {
+                "matched": [], "unmatched_invoices": [], "unmatched_receipts": [],
+            },
+        }
+
+        report_path = tmp_path / "下载报告.md"
+        cli.write_report_md(
+            str(report_path),
+            downloaded_all=[fol_a, inv_a, fol_b, inv_b],
+            failed=[],
+            skipped=[],
+            matching_result=matching_result,
+            date_range=("2025/05/01", "2025/05/31"),
+            iteration=1,
+            supplemental=False,
+            aggregation=None,
+        )
+
+        md = report_path.read_text(encoding="utf-8")
+
+        # P3 heading present
+        assert "### P3 同日兜底匹配（低可信度）" in md
+        # OCR dates column present
+        assert "入住 / 退房 (OCR)" in md
+        # The full-dates row
+        assert "2025-05-07 / 2025-05-08" in md
+        # The missing-dates fallback row renders '? / ?'
+        assert "? / ?" in md
+        # P3 (仅日期) label in the match-type column
+        assert "P3 (仅日期)" in md
+
+    def test_p3_heading_absent_when_no_p3_matches(self, tmp_path):
+        cli = self._load_cli_module()
+
+        fol = self._make_folio_record(
+            "/tmp/c_folio.pdf", "上海万豪", "2025-04-10", "2025-04-12", 900.00
+        )
+        inv = self._make_invoice_record(
+            "/tmp/c_invoice.pdf", "上海万豪", "2025-04-12", 900.00
+        )
+        matching_result = {
+            "hotel": {
+                # Only a P2 match — no P3 rows.
+                "matched": [self._make_p2_match(fol, inv)],
+                "unmatched_invoices": [],
+                "unmatched_folios": [],
+            },
+            "ridehailing": {
+                "matched": [], "unmatched_invoices": [], "unmatched_receipts": [],
+            },
+        }
+
+        report_path = tmp_path / "下载报告.md"
+        cli.write_report_md(
+            str(report_path),
+            downloaded_all=[fol, inv],
+            failed=[],
+            skipped=[],
+            matching_result=matching_result,
+            date_range=("2025/04/01", "2025/04/30"),
+            iteration=1,
+            supplemental=False,
+            aggregation=None,
+        )
+
+        md = report_path.read_text(encoding="utf-8")
+
+        # P3 heading must be absent
+        assert "### P3 同日兜底匹配（低可信度）" not in md
+        # OCR-dates column must be absent
+        assert "入住 / 退房 (OCR)" not in md
+        # Primary P1/P2 table header must be present — sanity check that
+        # the report was actually rendered (uses the v5.5-harmonized '发票'
+        # column header rather than the old '酒店发票').
+        assert "| 退房日 | 销售方 | 匹配方式 | 水单 | 发票 |" in md
+
 
 class TestRideHailingTiebreaker:
     def test_two_same_amount_invoices_pair_to_closest_receipt_by_file_number(self):
@@ -1434,6 +1816,169 @@ class TestMissingJsonStateMachine:
         assert payload["status"] == "user_action_required"
         assert payload["recommended_next_action"] == "ask_user"
 
+    # ─── v5.5 — out_of_range_items[] routing ─────────────────────────────
+    def test_folio_before_start_routes_to_out_of_range(self, tmp_path):
+        """v5.5: folio's departureDate before run_start_date → item lands
+        in out_of_range_items[], not items[]. status = converged."""
+        hotel = {
+            "unmatched_folios": [{
+                "_record": {
+                    "path": "/tmp/old_folio.pdf",
+                    "ocr": {
+                        "hotelName": "杭州万豪",
+                        "departureDate": "2025-03-18",  # before Q2 start
+                        "balance": 500,
+                    },
+                },
+            }],
+        }
+        matching = {"hotel": hotel, "ridehailing": {}}
+        mpath = tmp_path / "missing.json"
+        payload = write_missing_json(
+            str(mpath),
+            batch_dir=str(tmp_path),
+            iteration=1,
+            matching_result=matching,
+            unparsed_records=[],
+            run_start_date="2026/04/01",   # Q2 start
+            run_end_date="2026/07/01",     # Q2 end
+        )
+        assert payload["items"] == []
+        assert len(payload["out_of_range_items"]) == 1
+        orr = payload["out_of_range_items"][0]
+        assert orr["type"] == "hotel_invoice"  # missing type: invoice
+        assert orr["business_date"] == "2025-03-18"
+        assert orr["reason"] == "business_date_out_of_range"
+        assert payload["status"] == "converged"
+        assert payload["recommended_next_action"] == "stop"
+
+    def test_in_range_item_stays_in_items(self, tmp_path):
+        hotel = {
+            "unmatched_folios": [{
+                "_record": {"path": "/tmp/x.pdf", "ocr": {
+                    "hotelName": "H", "departureDate": "2026-05-10", "balance": 1,
+                }},
+            }],
+        }
+        payload = write_missing_json(
+            str(tmp_path / "m.json"),
+            batch_dir=str(tmp_path), iteration=1,
+            matching_result={"hotel": hotel, "ridehailing": {}},
+            unparsed_records=[],
+            run_start_date="2026/04/01", run_end_date="2026/07/01",
+        )
+        assert len(payload["items"]) == 1
+        assert payload["out_of_range_items"] == []
+        assert payload["status"] == "needs_retry"
+
+    def test_mixed_batch(self, tmp_path):
+        hotel = {
+            "unmatched_folios": [
+                {"_record": {"path": "/a.pdf", "ocr": {"hotelName": "A",
+                    "departureDate": "2025-03-10", "balance": 1}}},
+                {"_record": {"path": "/b.pdf", "ocr": {"hotelName": "B",
+                    "departureDate": "2026-05-10", "balance": 2}}},
+            ],
+        }
+        payload = write_missing_json(
+            str(tmp_path / "m.json"),
+            batch_dir=str(tmp_path), iteration=1,
+            matching_result={"hotel": hotel, "ridehailing": {}},
+            unparsed_records=[],
+            run_start_date="2026/04/01", run_end_date="2026/07/01",
+        )
+        assert len(payload["items"]) == 1
+        assert len(payload["out_of_range_items"]) == 1
+        assert payload["status"] == "needs_retry"
+
+    def test_missing_business_date_stays_in_items(self, tmp_path):
+        hotel = {
+            "unmatched_folios": [{"_record": {"path": "/x.pdf", "ocr": {
+                "hotelName": "X", "departureDate": None, "balance": 1,
+            }}}],
+        }
+        payload = write_missing_json(
+            str(tmp_path / "m.json"),
+            batch_dir=str(tmp_path), iteration=1,
+            matching_result={"hotel": hotel, "ridehailing": {}},
+            unparsed_records=[],
+            run_start_date="2026/04/01", run_end_date="2026/07/01",
+        )
+        assert len(payload["items"]) == 1
+        assert payload["out_of_range_items"] == []
+
+    def test_extraction_failed_never_filtered(self, tmp_path):
+        payload = write_missing_json(
+            str(tmp_path / "m.json"),
+            batch_dir=str(tmp_path), iteration=1,
+            matching_result={"hotel": {}, "ridehailing": {}},
+            unparsed_records=[{"path": "/x.pdf", "error": "boom"}],
+            run_start_date="2026/04/01", run_end_date="2026/07/01",
+        )
+        assert len(payload["items"]) == 1
+        assert payload["items"][0]["type"] == "extraction_failed"
+        assert payload["out_of_range_items"] == []
+
+    def test_boundary_start_inclusive_end_exclusive(self, tmp_path):
+        hotel = {
+            "unmatched_folios": [
+                {"_record": {"path": "/s.pdf", "ocr": {"hotelName": "S",
+                    "departureDate": "2026-04-01", "balance": 1}}},
+                {"_record": {"path": "/e.pdf", "ocr": {"hotelName": "E",
+                    "departureDate": "2026-07-01", "balance": 2}}},
+            ],
+        }
+        payload = write_missing_json(
+            str(tmp_path / "m.json"),
+            batch_dir=str(tmp_path), iteration=1,
+            matching_result={"hotel": hotel, "ridehailing": {}},
+            unparsed_records=[],
+            run_start_date="2026/04/01", run_end_date="2026/07/01",
+        )
+        # start inclusive — April 1 stays in items
+        assert sum(1 for it in payload["items"] if "s.pdf" in it["needed_for"]) == 1
+        # end exclusive — July 1 is out of range
+        assert sum(1 for it in payload["out_of_range_items"]
+                   if "e.pdf" in it["needed_for"]) == 1
+
+    def test_parse_cli_ymd_handles_gmail_format(self):
+        from postprocess import _parse_cli_ymd
+        import datetime
+        assert _parse_cli_ymd("2026/04/01") == datetime.date(2026, 4, 1)
+        assert _parse_cli_ymd("2026-04-01") == datetime.date(2026, 4, 1)
+        assert _parse_cli_ymd("") is None
+        assert _parse_cli_ymd("2026-04") is None
+        assert _parse_cli_ymd("abc") is None
+
+    def test_ridehailing_invoice_before_start_routes_to_out_of_range(self, tmp_path):
+        """v5.5: ride-hailing receipt with transactionDate before run_start
+        → item lands in out_of_range_items (not items). Covers the
+        ridehailing_invoice branch of the routing block."""
+        rh = {
+            "unmatched_receipts": [{
+                "_record": {
+                    "path": "/tmp/old_itinerary.pdf",
+                    "ocr": {
+                        "transactionDate": "2025-03-10",  # before Q2 start
+                        "totalAmount": 88.5,
+                    },
+                },
+            }],
+        }
+        payload = write_missing_json(
+            str(tmp_path / "m.json"),
+            batch_dir=str(tmp_path), iteration=1,
+            matching_result={"hotel": {}, "ridehailing": rh},
+            unparsed_records=[],
+            run_start_date="2026/04/01", run_end_date="2026/07/01",
+        )
+        assert payload["items"] == []
+        assert len(payload["out_of_range_items"]) == 1
+        orr = payload["out_of_range_items"][0]
+        assert orr["type"] == "ridehailing_invoice"  # missing type: invoice
+        assert orr["business_date"] == "2025-03-10"
+        assert orr["reason"] == "business_date_out_of_range"
+
 
 # =============================================================================
 # _compute_convergence_hash properties
@@ -1622,6 +2167,95 @@ class TestAnalyzePdfBatchAuthPropagation:
         # Must raise, not return results with all-UNPARSED
         with pytest.raises(LLMAuthError):
             analyze_pdf_batch(records, use_llm=True)
+
+
+class TestConcurrencyEnvVar:
+    """v5.5: LLM_OCR_CONCURRENCY honored; default bumped 2 → 5.
+
+    `postprocess.py` imports ThreadPoolExecutor via `from concurrent.futures
+    import ThreadPoolExecutor`, so the monkeypatch must target the module-
+    level binding `postprocess.ThreadPoolExecutor`, not the source class.
+    """
+
+    def _spy_executor_cls(self, captured):
+        import postprocess as _pp
+        real = _pp.ThreadPoolExecutor
+
+        class SpyExecutor(real):
+            def __init__(self, max_workers=None, *a, **k):
+                captured["max_workers"] = max_workers
+                super().__init__(max_workers=max_workers, *a, **k)
+
+        return SpyExecutor
+
+    def test_default_is_5_when_unset(self, monkeypatch):
+        monkeypatch.delenv("LLM_OCR_CONCURRENCY", raising=False)
+        captured: Dict[str, Any] = {}
+        monkeypatch.setattr(
+            "postprocess.ThreadPoolExecutor", self._spy_executor_cls(captured)
+        )
+        from postprocess import analyze_pdf_batch
+        analyze_pdf_batch([], use_llm=False)
+        assert captured.get("max_workers") == 5
+
+    def test_env_var_honored(self, monkeypatch):
+        monkeypatch.setenv("LLM_OCR_CONCURRENCY", "3")
+        captured: Dict[str, Any] = {}
+        monkeypatch.setattr(
+            "postprocess.ThreadPoolExecutor", self._spy_executor_cls(captured)
+        )
+        from postprocess import analyze_pdf_batch
+        analyze_pdf_batch([], use_llm=False)
+        assert captured.get("max_workers") == 3
+
+    def test_explicit_kwarg_beats_env(self, monkeypatch):
+        monkeypatch.setenv("LLM_OCR_CONCURRENCY", "10")
+        captured: Dict[str, Any] = {}
+        monkeypatch.setattr(
+            "postprocess.ThreadPoolExecutor", self._spy_executor_cls(captured)
+        )
+        from postprocess import analyze_pdf_batch
+        analyze_pdf_batch([], use_llm=False, max_workers=4)
+        assert captured.get("max_workers") == 4
+
+    def test_invalid_env_raises_config_error(self, monkeypatch):
+        from postprocess import analyze_pdf_batch
+        for bad in ("abc", "-1", "0"):
+            monkeypatch.setenv("LLM_OCR_CONCURRENCY", bad)
+            with pytest.raises(LLMConfigError):
+                analyze_pdf_batch([], use_llm=False)
+
+    def test_empty_env_is_unset(self, monkeypatch):
+        """Empty string should behave like the env var being unset."""
+        monkeypatch.setenv("LLM_OCR_CONCURRENCY", "")
+        captured: Dict[str, Any] = {}
+        monkeypatch.setattr(
+            "postprocess.ThreadPoolExecutor", self._spy_executor_cls(captured)
+        )
+        from postprocess import analyze_pdf_batch
+        analyze_pdf_batch([], use_llm=False)
+        assert captured.get("max_workers") == 5
+
+    def test_cli_does_not_hardcode_max_workers(self):
+        """Regression guard for v5.5 task-5 bug: download-invoices.py must
+        NOT pass max_workers= as a literal to analyze_pdf_batch — it
+        would bypass LLM_OCR_CONCURRENCY. Use the sentinel None default."""
+        import pathlib
+        import re
+        repo_root = pathlib.Path(__file__).resolve().parent.parent
+        src = (repo_root / "scripts" / "download-invoices.py").read_text()
+        # Grab each call's arg region
+        calls = re.findall(
+            r"analyze_pdf_batch\s*\([^)]*?\)",
+            src,
+            re.DOTALL,
+        )
+        assert calls, "could not locate analyze_pdf_batch call — test may be stale"
+        for call in calls:
+            assert "max_workers" not in call, (
+                f"analyze_pdf_batch call hardcodes max_workers; "
+                f"this would bypass LLM_OCR_CONCURRENCY:\n{call}"
+            )
 
 
 # =============================================================================
