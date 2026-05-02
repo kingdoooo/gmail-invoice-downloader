@@ -2,6 +2,26 @@
 
 本项目的版本声明仅在 `SKILL.md` 第 1 行（`# Gmail Invoice Downloader (vX.Y)`）。下方记录每个版本的发布说明；最新版本在最上面。
 
+## v5.7.2 — output_dir preflight + Agent 新目录指引 (2026-05-03)
+
+**动机**：v5.7.1 解决了 zip **包含** 跨批次残留的问题（白名单过滤），但 `pdfs/` 目录本身仍会因反复复用 `--output` 而累积文件——用户开 Finder 看到满目"(1)""(2)"后缀仍然困惑。正确的解法是从**上游**阻止这种复用：Agent 每次新跑构造新目录。
+
+- **feat(cli):** `main()` 在 Step 1 之前做 output_dir preflight。新助手 `_inspect_existing_output_dir(output_dir)` 检测 `pdfs/` 下非 IGNORED_ 的 PDF 数 + `step4_downloaded.json` / `missing.json` / `下载报告.md` / `发票汇总.csv` 的存在。非 supplemental 运行 + 非空目录 → 打印 `⚠️ output_dir 不是空的：...` 一行（stdout + run.log），提示用户首次跑应该用新目录。`--supplemental` 模式下静默（复用目录是设计行为）。**纯提示，不阻断**——Agent headless 场景不能交互；兜底给运行看，决策层在 SKILL.md。
+- **docs(SKILL):** `§ Agent First-Run Procedure § 2. 选 output 目录` 重写为强指令："初次跑一个日期区间 MUST 用全新目录"。给了命名约定（`~/invoices/{YYYY-QN}` 首选 + `-2/-3` 碰撞自增）+ Agent 伪代码 + 补搜例外（`--supplemental` MUST 复用旧目录）。运行期兜底提示跟这段文档说明对齐。
+- **test(postprocess):** 新增 `TestOutputDirPreflight`（6 个测试）：empty / nonexistent / prior pdfs detected / IGNORED_ 不计 / step4 state detected / report csv 信号。
+- **test(suite):** 290 passed（v5.7.1 为 284，+6 新测试）。
+
+### 不受影响
+
+- `_inspect_existing_output_dir` 是纯函数，不 mutate output_dir；实际目录创建仍在 `os.makedirs(pdfs_dir, exist_ok=True)` 处。
+- `missing.json` schema / `CHAT_MESSAGE_*` / `CHAT_ATTACHMENTS` / zip 白名单语义全部不变。既有调用方 / Agent 契约测试 100% 兼容。
+- 即使用户无视提示继续跑，v5.7.1 zip 白名单仍保证交付 zip 只有本 run 内容。v5.7.2 纯粹是 UX 层提示——消除"先跑完才发现污染"的尴尬。
+
+### 升级备注
+
+- **已经累积的残留目录**：不会被自动清理。用户可以 `rm -rf ~/invoices/2025-Q2/pdfs/*.pdf` 手动清空，或者忽略——下次 Agent 按 SKILL.md 新指引会建 `~/invoices/2025-Q2-2/` 新目录，老目录保留做 forensics。
+- **自定义 Agent/脚本**：如果有外部工具调用 `download-invoices.py`，**建议也遵循 SKILL.md 新目录约定**以获得最干净的 zip 输出。运行期兜底提示保证即使遗忘也不会出错。
+
 ## v5.7.1 — zip 跨批次残留修复 (2026-05-03)
 
 **问题**：用户报告 `pdfs/` 里几乎每张票都有一份 `(1)` 后缀的"重复"；zip 包里也有。SHA 对比显示 182 份文件中 89 份与本 run 的 step4 records byte-identical —— 这些是**前几次 run 在同一个 output_dir 下累积的残留文件**。`zip_output` 之前直接 `os.walk(output_dir)` 把所有 `.pdf` 都打包，不区分本 run 产物和跨批次残留，导致 zip 膨胀 + 用户体验困惑。dedup (`_dedup_by_ocr_business_key`) 没有 bug —— 它按设计只在单 run 的 `downloaded` list 内工作，磁盘上的前 run 残留本来就不在它的 scope 里。

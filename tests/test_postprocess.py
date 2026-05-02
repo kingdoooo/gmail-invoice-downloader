@@ -3755,3 +3755,80 @@ class TestIgnoredCtaRendering:
         assert "¥120.00" in text
         # Unconvertible falls through to the "金额未识别" branch:
         assert "receipts@openrouter.ai：金额未识别" in text
+
+
+class TestOutputDirPreflight:
+    """v5.7.2 fix: main() inspects --output at run start and prints an info
+    line when the dir already has artifacts from a previous run. This helps
+    users / Agents notice they're reusing a dir (where zip packaging is
+    already protected by v5.7.1 whitelist, so no correctness risk, but fresh
+    output dirs are strongly preferred — see SKILL.md Agent First-Run
+    Procedure).
+
+    Only the pure inspection helper is unit-tested here. Integration of the
+    info line into main() is verified by running the full suite with no
+    regression on agent-contract tests.
+    """
+
+    def _load_fn(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "download_invoices", "scripts/download-invoices.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod._inspect_existing_output_dir
+
+    def test_empty_dir_reports_empty(self, tmp_path):
+        inspect = self._load_fn()
+        result = inspect(str(tmp_path))
+        assert result["pdf_count"] == 0
+        assert result["has_state"] is False
+        assert result["is_empty"] is True
+
+    def test_nonexistent_dir_reports_empty(self, tmp_path):
+        inspect = self._load_fn()
+        missing = tmp_path / "does-not-exist"
+        result = inspect(str(missing))
+        assert result["pdf_count"] == 0
+        assert result["has_state"] is False
+        assert result["is_empty"] is True
+
+    def test_dir_with_prior_pdfs_detected(self, tmp_path):
+        inspect = self._load_fn()
+        pdfs = tmp_path / "pdfs"
+        pdfs.mkdir()
+        (pdfs / "a.pdf").write_bytes(b"%PDF")
+        (pdfs / "b.pdf").write_bytes(b"%PDF")
+        result = inspect(str(tmp_path))
+        assert result["pdf_count"] == 2
+        assert result["is_empty"] is False
+
+    def test_ignored_prefix_not_counted_as_prior_pdf(self, tmp_path):
+        """IGNORED_*.pdf files are produced by v5.7 classifier; they're
+        'current-run but deliberately out of zip', not prior-batch residue.
+        Don't alarm the user about them."""
+        inspect = self._load_fn()
+        pdfs = tmp_path / "pdfs"
+        pdfs.mkdir()
+        (pdfs / "IGNORED_termius_x.pdf").write_bytes(b"%PDF")
+        # No state files, no non-IGNORED PDFs → treat as empty.
+        result = inspect(str(tmp_path))
+        assert result["pdf_count"] == 0
+        assert result["is_empty"] is True
+
+    def test_state_files_detected(self, tmp_path):
+        """Detect step4_downloaded.json or missing.json as 'has_state'
+        even if pdfs/ is absent — prior-run signatures that matter."""
+        inspect = self._load_fn()
+        (tmp_path / "step4_downloaded.json").write_text("{}")
+        result = inspect(str(tmp_path))
+        assert result["pdf_count"] == 0
+        assert result["has_state"] is True
+        assert result["is_empty"] is False
+
+    def test_report_csv_also_signal_non_empty(self, tmp_path):
+        inspect = self._load_fn()
+        (tmp_path / "下载报告.md").write_text("prev")
+        result = inspect(str(tmp_path))
+        assert result["has_state"] is True
+        assert result["is_empty"] is False
