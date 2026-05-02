@@ -1,8 +1,4 @@
 """Tests for scripts/invoice_helpers.py — platform URL extractors."""
-import sys
-import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
-
 from invoice_helpers import extract_nuonuo_short_url
 
 

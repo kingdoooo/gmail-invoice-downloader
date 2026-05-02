@@ -446,6 +446,8 @@ def extract_nuonuo_short_url(body):
     """
     urls = re.findall(r'https?://nnfp\.jss\.com\.cn/[\w\-=]+', body)
     EXCLUDED = ('/allow', '/invoice', '/scan', '/sapi', '/scan-invoice')
+    # Match exact path or path followed by '/'; preserves prefix-collisions
+    # like /allowedXYZ which would be a legitimate short code.
     urls = [
         u for u in urls
         if not any(p + '/' in u or u.endswith(p) for p in EXCLUDED)
