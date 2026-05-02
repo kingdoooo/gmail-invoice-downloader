@@ -909,6 +909,48 @@ def _count_leftover_pdfs(pdfs_dir: str, this_run_paths: set) -> int:
     return leftover
 
 
+def _inspect_existing_output_dir(output_dir: str) -> dict:
+    """Inspect output_dir before a fresh run to detect prior-batch content.
+
+    v5.7.2: feeds the "use a new folder" nudge. Returns:
+      - pdf_count: number of .pdf files in output_dir/pdfs/ that are NOT
+        IGNORED_* (IGNORED files are v5.7 classifier artifacts that live
+        alongside the batch by design, not a signal of prior-run residue).
+      - has_state: True iff any of step4_downloaded.json / missing.json /
+        下载报告.md / 发票汇总.csv exists (strong prior-run signatures).
+      - is_empty: True when both pdf_count == 0 and has_state is False —
+        safe to proceed without a warning.
+
+    A non-existent output_dir is treated as empty (fresh-run ideal).
+    """
+    result = {"pdf_count": 0, "has_state": False, "is_empty": True}
+    if not os.path.isdir(output_dir):
+        return result
+
+    pdfs_dir = os.path.join(output_dir, "pdfs")
+    if os.path.isdir(pdfs_dir):
+        for fn in os.listdir(pdfs_dir):
+            if not fn.lower().endswith(".pdf"):
+                continue
+            if fn.startswith("IGNORED_"):
+                continue
+            result["pdf_count"] += 1
+
+    state_signatures = (
+        "step4_downloaded.json",
+        "missing.json",
+        "下载报告.md",
+        "发票汇总.csv",
+    )
+    for sig in state_signatures:
+        if os.path.exists(os.path.join(output_dir, sig)):
+            result["has_state"] = True
+            break
+
+    result["is_empty"] = (result["pdf_count"] == 0 and not result["has_state"])
+    return result
+
+
 def _run_postprocess_only(
     *,
     output_dir: str,
@@ -1273,6 +1315,29 @@ def main():
     say(f"Date range: {args.start} → {args.end}")
     say(f"LLM provider: {os.environ.get('LLM_PROVIDER', 'bedrock')}"
         + (" [disabled]" if not use_llm else ""))
+
+    # --- v5.7.2 output-dir preflight ---
+    # Warn — but do not block — when INITIAL run reuses a dir that already
+    # has prior-batch content. The v5.7.1 zip whitelist makes this safe for
+    # correctness, but mixing batches in one dir is confusing. SUPPLEMENTAL
+    # runs skip the warning because reusing the dir is by design. Agents
+    # should construct a fresh --output path per SKILL.md § Agent First-Run
+    # Procedure; this info line is the runtime safety net.
+    if not args.supplemental:
+        preflight = _inspect_existing_output_dir(output_dir)
+        if not preflight["is_empty"]:
+            signals = []
+            if preflight["pdf_count"] > 0:
+                signals.append(f"pdfs/ 有 {preflight['pdf_count']} 份前次批次的 PDF")
+            if preflight["has_state"]:
+                signals.append("存在之前的状态文件 (step4_downloaded.json / missing.json / 报告)")
+            say(
+                f"⚠️  output_dir 不是空的：{output_dir}\n"
+                f"    " + "；".join(signals) + "。\n"
+                f"    继续跑仍然安全（v5.7.1 zip 白名单已去重跨批次残留），但首次跑建议用新目录：\n"
+                f"    --output ~/invoices/{{YYYY-QN}}-{{timestamp}}\n"
+                f"    补搜请加 --supplemental flag。"
+            )
 
     # --- Query ---
     exclusions = load_exclusions(SKILL_DIR)
