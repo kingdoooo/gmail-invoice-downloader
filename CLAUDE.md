@@ -8,7 +8,7 @@ All `Agent` tool calls in this repo MUST use Opus 4.7. Pass `model: "opus"` expl
 
 ## Project
 
-`gmail-invoice-downloader` is an OpenClaw Skill that batch-downloads invoices / receipts / hotel folios / ride-hailing itineraries from Gmail, OCRs them with an LLM, pairs folio↔invoice + itinerary↔invoice, and emits `下载报告.md` + `发票汇总.csv` + `missing.json` + a zip bundle. Shipped version: **v5.4**; active branch: `feat/v5.5-agent-ready-polish` (see `docs/plans/2026-05-02-005-v5.5-agent-ready-polish-plan.md`).
+`gmail-invoice-downloader` is an OpenClaw Skill that batch-downloads invoices / receipts / hotel folios / ride-hailing itineraries from Gmail, OCRs them with an LLM, pairs folio↔invoice + itinerary↔invoice, and emits `下载报告.md` + `发票汇总.csv` + `missing.json` + a zip bundle. Current version is declared on `SKILL.md` line 1.
 
 ## Common commands
 
@@ -56,7 +56,7 @@ python3 scripts/download-invoices.py --supplemental --start ... --end ... \
 ### Layer 2 — LLM post-processing (`scripts/postprocess.py` + `scripts/core/`)
 
 Steps 6–10, added in v5.3 and extended in v5.4:
-6. `analyze_pdf_batch` — `ThreadPoolExecutor(max_workers=2)` runs `core.llm_ocr.extract_from_bytes` + `core.validation.validate_ocr_plausibility` per PDF. (v5.5 Task 5 will raise default to 5 + expose `LLM_OCR_CONCURRENCY`.)
+6. `analyze_pdf_batch` — `ThreadPoolExecutor` runs `core.llm_ocr.extract_from_bytes` + `core.validation.validate_ocr_plausibility` per PDF. Default concurrency is 5; override via `LLM_OCR_CONCURRENCY` env var (v5.5 raised default from 2 to 5). Anthropic tier-1 users may need `LLM_OCR_CONCURRENCY=2`.
 7. `rename_by_ocr` — rewrite filename to `{YYYYMMDD}_{vendor}_{category}.pdf` using LLM fields; `sanitize_filename` guards against path traversal.
 8. `_dedup_by_ocr_business_key` then `do_all_matching`:
    - **Dedup** (v5.4): collapse duplicate PDFs by OCR business key (invoice number, itinerary file number, or SHA256 for `RIDEHAILING_RECEIPT` where no stable ID exists). Runs before matching and again after supplemental merge.
@@ -92,7 +92,7 @@ The Skill is driven by AI Agents in a loop (see SKILL.md "Agent First-Run Proced
 - **Aggregation is single-source.** `build_aggregation` produces the rows; the MD report, CSV, and stdout OpenClaw summary all read from it. If you change category totals or the row schema, update all three consumers (tests in `TestBuildAggregation` + `TestAggregationConsistency` + `TestPrintOpenClawSummary`).
 - **LLM provider additions:** subclass `LLMClient` in `llm_client.py`, add an enum branch in `get_client()`, add a doctor check in `doctor.py::_check_llm_config`, add a test class in `test_postprocess.py::TestProviderMatrix` + `TestDoctorLLMMatrix`. The `*-compatible` subclasses are thin factories requiring a `*_BASE_URL` env var; keep that pattern.
 - **Never hardcode proxy URLs or API keys in SKILL.md or test files.** Use `<your-proxy-base-url>` / `<your-key>` placeholders. Test fixtures use `dummy-key` to avoid secret-scanner false positives.
-- **Version string lives in multiple places today** (SKILL.md header, `scripts/download-invoices.py` docstring + argparse description, `CLAUDE.md`). v5.5 Task 7 consolidates these into a single source; until it lands, bump all sites together when releasing.
+- **Version label lives only in `SKILL.md` line 1.** On release, bump that line. Don't add parenthesized version suffixes to section headings, module docstrings, argparse descriptions, or runtime banners. Historical labels ("v5.2 rule", "NEW for v5.3", `"date_only (v5.2 fallback)"`) that describe *when a concept was introduced* are fine — they're lineage, not a current-version claim.
 
 ## Dependencies
 
@@ -113,5 +113,5 @@ Integration tests use real anonymized PDFs from `~/Documents/agent Test/` by def
 - `references/seasonal-smoke.md` — quarterly real-Gmail + real-LLM smoke runbook. Complements `tests/test_agent_contract.py` (fully mocked). Run at quarter end, after major refactors, and after LLM provider additions.
 - `learned_exclusions.json` — single source of truth for Gmail `-from:` / `-subject:` exclusion rules. User-editable.
 - `docs/brainstorms/` — per-feature requirements notes (dated; origin for plans).
-- `docs/plans/` — numbered implementation plans (`NNN-<slug>-plan.md`). The active v5.5 plan (`005`) is the source of truth for in-flight work.
+- `docs/plans/` — numbered implementation plans (`NNN-<slug>-plan.md`). Historical record of what shipped in each bundle.
 - `docs/solutions/` — postmortem / issue writeups (e.g., `2026-05-01-termius-saas-misclassified-as-hotel-folio.md`). Link new entries from `MEMORY.md` when saving project memories.

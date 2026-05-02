@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Gmail Invoice Downloader — end-to-end CLI (v5.3).
+Gmail Invoice Downloader — end-to-end CLI.
 
 v5.3 upgrade: LLM OCR replaces pdftotext heuristics for invoice field
 extraction. Downstream matching (hotel P1/P2/P3, ride-hailing by amount),
@@ -508,7 +508,7 @@ def write_report_md(
         return sum(1 for d in valid if d.get("category") == cat)
 
     lines = []
-    lines.append("# Gmail 发票下载报告 (v5.3)\n")
+    lines.append("# Gmail 发票下载报告\n")
     lines.append(f"**日期范围**：{date_range[0]} → {date_range[1]}  ")
     lines.append(f"**生成时间**：{now.strftime('%Y-%m-%d %H:%M:%S')} CST  ")
     lines.append(f"**轮次**：iteration={iteration}  "
@@ -996,7 +996,7 @@ def _run_postprocess_only(
 
 def main():
     ap = argparse.ArgumentParser(
-        description="Gmail Invoice Downloader v5.3 — search, download, OCR, match, report.",
+        description="Gmail Invoice Downloader — search, download, OCR, match, report.",
     )
     # --start / --end are required for normal runs. In --postprocess-only mode
     # (Step 6-10 only, no Gmail) the date range is irrelevant; we check + enforce
@@ -1133,7 +1133,7 @@ def main():
 
     say("=" * 70)
     mode = "SUPPLEMENTAL" if args.supplemental else "INITIAL"
-    say(f"Gmail Invoice Downloader v5.3 — {mode} iteration={iteration}")
+    say(f"Gmail Invoice Downloader — {mode} iteration={iteration}")
     say(f"Run started @ {datetime.datetime.now(CST).strftime('%Y-%m-%d %H:%M:%S')} CST")
     say("=" * 70)
     say(f"Date range: {args.start} → {args.end}")
