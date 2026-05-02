@@ -354,7 +354,18 @@ def rename_by_ocr(
         return record
 
     # Happy path: {YYYYMMDD}_{vendor}_{label}.pdf
-    date_str = normalize_date(ocr.get("transactionDate")) or record.get("date", "")
+    # v5.5: HOTEL_FOLIO prefers departureDate over transactionDate. On
+    # fresh OCR (post-v5.5 prompt) the two are equal for folios. On stale
+    # OCR cache the preference keeps the filename tied to checkout, not
+    # check-in, which matches the matcher's actual key.
+    if category == "HOTEL_FOLIO":
+        date_str = (
+            normalize_date(ocr.get("departureDate"))
+            or normalize_date(ocr.get("transactionDate"))
+            or record.get("date", "")
+        )
+    else:
+        date_str = normalize_date(ocr.get("transactionDate")) or record.get("date", "")
     vendor = sanitize_filename(ocr.get("vendorName") or record.get("merchant") or "未知商户")
     label = CATEGORY_LABELS.get(category, "发票")
     new_filename = f"{date_str}_{vendor}_{label}.pdf"
@@ -615,10 +626,21 @@ def do_all_matching(downloaded: List[Dict[str, Any]]) -> Dict[str, Any]:
             inv_date = inv.get("transactionDate")
             fol_checkout = fol.get("checkOutDate") or fol.get("departureDate")
             if inv_date and fol_checkout and inv_date == fol_checkout:
+                # v5.5: expose folio arrival/departure on the P3 match
+                # record so the report writer can render the OCR dates
+                # reviewers actually care about (filename date may be
+                # email-internalDate-derived, potentially weeks off).
+                fol_rec = fol.get("_record") or {}
+                fol_ocr = fol_rec.get("ocr") or {}
                 tier3.append({
                     "invoice": inv, "folio": fol,
                     "match_type": "date_only (v5.2 fallback)",
                     "confidence": "low",
+                    "folio_arrival_date": fol_ocr.get("arrivalDate"),
+                    "folio_departure_date": (
+                        fol_ocr.get("departureDate")
+                        or fol_ocr.get("checkOutDate")
+                    ),
                 })
                 used_fol_idx.add(i)
                 break

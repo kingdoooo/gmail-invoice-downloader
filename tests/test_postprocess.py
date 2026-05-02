@@ -437,6 +437,76 @@ class TestRenameHappyPath:
         assert result["category"] == "UNPARSED"
 
 
+class TestRenameByOCRFolioDate:
+    """v5.5: HOTEL_FOLIO rename prefers OCR departureDate over
+    internalDate-derived filename. Other categories unchanged."""
+
+    def test_folio_uses_departure_date_when_present(self, tmp_path):
+        pdfs = tmp_path / "pdfs"
+        pdfs.mkdir()
+        src = pdfs / "original.pdf"
+        src.write_bytes(b"%PDF-1.4\n...")
+        record = {
+            "path": str(src),
+            "message_id": "msg123",
+            "merchant": "苏州万豪",
+            "date": "20250607",   # internalDate-derived, *not* to be used
+        }
+        analysis = {
+            "ocr": {
+                "transactionDate": "2025-05-07",  # check-in (arrivalDate)
+                "departureDate": "2025-05-08",    # check-out (v5.5 canonical)
+                "vendorName": "苏州万豪",
+            },
+            "category": "HOTEL_FOLIO",
+        }
+        rename_by_ocr(record, analysis, str(pdfs))
+        assert os.path.basename(record["path"]).startswith("20250508_"), \
+            f"Expected departureDate 20250508, got {record['path']}"
+
+    def test_folio_falls_back_to_transaction_date_when_departure_missing(
+        self, tmp_path,
+    ):
+        pdfs = tmp_path / "pdfs"
+        pdfs.mkdir()
+        src = pdfs / "original.pdf"
+        src.write_bytes(b"%PDF-1.4\n...")
+        record = {
+            "path": str(src),
+            "message_id": "msg123",
+            "merchant": "X",
+            "date": "20250101",
+        }
+        analysis = {
+            "ocr": {
+                "transactionDate": "2025-05-07",
+                "departureDate": None,
+                "vendorName": "X",
+            },
+            "category": "HOTEL_FOLIO",
+        }
+        rename_by_ocr(record, analysis, str(pdfs))
+        assert os.path.basename(record["path"]).startswith("20250507_")
+
+    def test_hotel_invoice_unaffected(self, tmp_path):
+        """HOTEL_INVOICE keeps v5.3 behavior: uses transactionDate."""
+        pdfs = tmp_path / "pdfs"
+        pdfs.mkdir()
+        src = pdfs / "original.pdf"
+        src.write_bytes(b"%PDF-1.4\n...")
+        record = {"path": str(src), "message_id": "x", "merchant": "Y", "date": ""}
+        analysis = {
+            "ocr": {
+                "transactionDate": "2025-05-08",
+                "departureDate": "2025-05-10",   # should be ignored for invoices
+                "vendorName": "Y",
+            },
+            "category": "HOTEL_INVOICE",
+        }
+        rename_by_ocr(record, analysis, str(pdfs))
+        assert os.path.basename(record["path"]).startswith("20250508_")
+
+
 # =============================================================================
 # #22 HIGH — zip atomic write + allowlist
 # =============================================================================
@@ -1203,6 +1273,52 @@ class TestHotelMatchingTiers:
         assert len(result["hotel"]["matched"]) == 0
         assert len(result["hotel"]["unmatched_invoices"]) == 1
         assert len(result["hotel"]["unmatched_folios"]) == 1
+
+    def test_p3_match_carries_folio_arrival_and_departure(self):
+        """v5.5: P3 fallback records folio OCR dates so report can render
+        the actual checkout date reviewers care about (not the filename-
+        derived internalDate which may be weeks off)."""
+        records = [
+            # folio — email internalDate 2025-06-07 (later), OCR says 5/7→5/8
+            {
+                "path": "/tmp/a_folio.pdf",
+                "valid": True,
+                "category": "HOTEL_FOLIO",
+                "ocr": {
+                    "hotelName": "苏州万豪",
+                    "arrivalDate": "2025-05-07",
+                    "departureDate": "2025-05-08",
+                    "transactionDate": "2025-05-08",
+                    "balance": 583.97,
+                    "confirmationNo": "4329092847491260840",
+                },
+                "vendor_name": "苏州万豪",
+                "transaction_date": "20250508",
+            },
+            # invoice — OCR date 5/8, amount different (P2 miss), remark
+            # doesn't match confirmationNo (P1 miss).
+            {
+                "path": "/tmp/b_invoice.pdf",
+                "valid": True,
+                "category": "HOTEL_INVOICE",
+                "ocr": {
+                    "vendorName": "苏州万豪",
+                    "transactionDate": "2025-05-08",
+                    "transactionAmount": 605.15,
+                    "remark": "96978435",
+                },
+                "vendor_name": "苏州万豪",
+                "transaction_date": "20250508",
+            },
+        ]
+        result = do_all_matching(records)
+        hotel_matches = result["hotel"].get("matched", [])
+        # Find the P3 pair
+        p3 = [m for m in hotel_matches if m.get("match_type", "").startswith("date_only")]
+        assert len(p3) == 1
+        m = p3[0]
+        assert m["folio_arrival_date"] == "2025-05-07"
+        assert m["folio_departure_date"] == "2025-05-08"
 
 
 class TestRideHailingTiebreaker:

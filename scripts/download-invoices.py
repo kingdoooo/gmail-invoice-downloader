@@ -571,10 +571,18 @@ def write_report_md(
     matched = hotel.get("matched", [])
     if matched or hotel.get("unmatched_invoices") or hotel.get("unmatched_folios"):
         lines.append("## 🏨 酒店入住配对\n")
-        if matched:
+        # v5.5: split P1/P2 (trusted) from P3 (date-only fallback) so P3 can
+        # surface the folio OCR arrival/departure dates reviewers care about.
+        # Filename-derived dates on P3 rows may be email-internalDate-based
+        # and drift weeks from the actual checkout.
+        primary = [m for m in matched
+                   if m.get("match_type") != "date_only (v5.2 fallback)"]
+        fallback = [m for m in matched
+                    if m.get("match_type") == "date_only (v5.2 fallback)"]
+        if primary:
             lines.append("| 退房日 | 销售方 | 匹配方式 | 水单 | 酒店发票 |")
             lines.append("|--------|--------|----------|:----:|:--------:|")
-            for m in matched:
+            for m in primary:
                 inv_rec = (m["invoice"].get("_record") or {})
                 fol_rec = (m["folio"].get("_record") or {})
                 inv_date = m["invoice"].get("transactionDate") or inv_rec.get("date", "") or "?"
@@ -585,9 +593,25 @@ def write_report_md(
                 type_label = {
                     "remark": "P1 (remark)",
                     "date_amount": "P2 (日期+金额)",
-                    "date_only (v5.2 fallback)": "P3 (仅日期)⚠️",
                 }.get(match_type, match_type)
                 lines.append(f"| {inv_date} | {vendor} | {type_label} | `{fol_name}` | `{inv_name}` |")
+            lines.append("")
+        if fallback:
+            lines.append("### P3 同日兜底匹配（低可信度）\n")
+            lines.append("| 销售方 | 匹配方式 | 入住 / 退房 (OCR) | 水单 | 发票 |")
+            lines.append("|--------|----------|-------------------|:----:|:----:|")
+            for m in fallback:
+                inv_rec = (m["invoice"].get("_record") or {})
+                fol_rec = (m["folio"].get("_record") or {})
+                vendor = (inv_rec.get("ocr") or {}).get("vendorName") or inv_rec.get("merchant", "?")
+                arrival = m.get("folio_arrival_date") or "?"
+                departure = m.get("folio_departure_date") or "?"
+                inv_name = os.path.basename(inv_rec.get("path", ""))
+                fol_name = os.path.basename(fol_rec.get("path", ""))
+                lines.append(
+                    f"| {vendor} | P3 (仅日期)⚠️ | {arrival} / {departure} "
+                    f"| `{fol_name}` | `{inv_name}` |"
+                )
             lines.append("")
         if hotel.get("unmatched_invoices"):
             lines.append(f"### ⚠️ 无水单的酒店发票（{len(hotel['unmatched_invoices'])} 张）\n")
