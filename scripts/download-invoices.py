@@ -859,6 +859,56 @@ def _previous_iteration(output_dir):
         return 0
 
 
+def _collect_this_run_pdf_paths(downloaded_all) -> set:
+    """Return the set of PDF paths produced by this run (v5.7.1 fix).
+
+    Simpler than iterating matching_result: every record rename_by_ocr
+    touched lives in ``downloaded_all`` with a current ``path`` field
+    (post-rename on happy/UNPARSED/IGNORED paths). Dedup losers that
+    were physically unlinked drop off os.walk naturally — no need to
+    whitelist them here. IGNORED paths are in the set too; the
+    ``IGNORED_`` prefix filter in ``zip_output`` handles their exclusion
+    so the record listing stays authoritative.
+
+    Anything in ``output_dir/pdfs/`` not in this set is a cross-batch
+    leftover (previous-run residue) and will be kept on disk for audit
+    but not shipped in the zip.
+    """
+    paths: set = set()
+    for rec in downloaded_all or []:
+        if not isinstance(rec, dict):
+            continue
+        p = rec.get("path")
+        if p:
+            paths.add(p)
+    return paths
+
+
+def _count_leftover_pdfs(pdfs_dir: str, this_run_paths: set) -> int:
+    """Count PDFs in pdfs_dir that are not part of this run's whitelist.
+
+    Used to print a user-visible info line about cross-batch residue.
+    IGNORED_* and UNPARSED_* are still "this run" if they were produced
+    this run; leftovers are files neither in this_run_paths nor prefixed
+    for exclusion. Treat IGNORED_-prefixed files as excluded-by-design
+    (not counted as leftovers — they're current-run but intentionally
+    not in the whitelist).
+    """
+    if not os.path.isdir(pdfs_dir):
+        return 0
+    whitelist_abs = {os.path.abspath(p) for p in this_run_paths}
+    leftover = 0
+    for fn in os.listdir(pdfs_dir):
+        if not fn.lower().endswith(".pdf"):
+            continue
+        if fn.startswith("IGNORED_"):
+            continue
+        fp = os.path.abspath(os.path.join(pdfs_dir, fn))
+        if fp not in whitelist_abs:
+            leftover += 1
+    return leftover
+
+
 def _run_postprocess_only(
     *,
     output_dir: str,
@@ -1016,9 +1066,19 @@ def _run_postprocess_only(
         f"items={len(missing_payload['items'])})")
 
     # --- Step 10: zip ---
+    # v5.7.1: same whitelist + leftover-info pattern as main(). In postprocess-
+    # only flow `records` is the in-memory list of this run's PDFs; prior-run
+    # residue (files already in pdfs_dir before we started) falls through.
+    this_run_paths = _collect_this_run_pdf_paths(records)
+    leftover_count = _count_leftover_pdfs(pdfs_dir, this_run_paths)
+    if leftover_count > 0:
+        say(
+            f"ℹ️  跨批次残留：pdfs/ 目录里有 {leftover_count} 份 PDF 未出现在本次 run "
+            f"的记录里，未打包进本次 zip（仍保留在磁盘上供审计）。"
+        )
     zip_path = None
     try:
-        zip_path = zip_output(output_dir)
+        zip_path = zip_output(output_dir, include_pdf_paths=this_run_paths)
         say(f"✅ Zip:      {zip_path}")
     except RuntimeError as e:
         say(f"⚠️  zip skipped: {e}")
@@ -1437,9 +1497,20 @@ def main():
         f"items={len(missing_payload['items'])})")
 
     # --- Step 10: zip the output dir (DEC-6: degrade to None on failure) ---
+    # v5.7.1: pass include_pdf_paths so cross-batch leftovers in pdfs_dir
+    # (files from previous runs that accumulated across invocations) stay
+    # on disk for audit but don't get packaged into the deliverable zip.
+    this_run_paths = _collect_this_run_pdf_paths(downloaded_all)
+    leftover_count = _count_leftover_pdfs(pdfs_dir, this_run_paths)
+    if leftover_count > 0:
+        say(
+            f"ℹ️  跨批次残留：pdfs/ 目录里有 {leftover_count} 份 PDF 来自之前的批次，"
+            f"未打包进本次 zip（仍保留在磁盘上供审计）。"
+            f"如需清理：rm {pdfs_dir}/*.pdf 后重跑。"
+        )
     zip_path = None
     try:
-        zip_path = zip_output(output_dir)
+        zip_path = zip_output(output_dir, include_pdf_paths=this_run_paths)
         say(f"✅ Zip:      {zip_path}")
     except RuntimeError as e:
         say(f"⚠️  zip skipped: {e}")

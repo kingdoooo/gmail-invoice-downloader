@@ -597,6 +597,115 @@ class TestZipAtomic:
         assert "UNPARSED_abc_bad.pdf" in names  # preserved
         assert "IGNORED_termius_Q9YJOO4I.pdf" not in names  # excluded
 
+    def test_include_pdf_paths_whitelist_excludes_cross_run_leftovers(self, tmp_path):
+        """v5.7.1 fix: zip_output accepts include_pdf_paths={str,...} — only
+        PDFs whose absolute path is in the set get packaged. Leftover PDFs
+        from previous runs that happen to sit in output_dir/pdfs/ are left on
+        disk for audit but not shipped in the deliverable zip.
+        """
+        from postprocess import zip_output
+        out = tmp_path / "batch"
+        out.mkdir()
+        pdfs = out / "pdfs"
+        pdfs.mkdir()
+
+        this_run = pdfs / "20251112_Marriott_水单.pdf"
+        leftover_a = pdfs / "20250107_中国铁路_火车票.pdf"         # prev run
+        leftover_b = pdfs / "20250108_中国铁路_火车票 (1).pdf"      # prev run
+        this_run.write_bytes(b"%PDF current")
+        leftover_a.write_bytes(b"%PDF prev a")
+        leftover_b.write_bytes(b"%PDF prev b")
+        (out / "下载报告.md").write_text("report")
+        (out / "发票汇总.csv").write_text("csv")
+
+        include = {str(this_run)}
+        zp = zip_output(str(out), include_pdf_paths=include)
+
+        import zipfile
+        with zipfile.ZipFile(zp) as zf:
+            names = {os.path.basename(n) for n in zf.namelist()}
+        assert "20251112_Marriott_水单.pdf" in names
+        assert "20250107_中国铁路_火车票.pdf" not in names
+        assert "20250108_中国铁路_火车票 (1).pdf" not in names
+
+        # Leftovers remain on disk (audit trail preserved)
+        assert leftover_a.exists()
+        assert leftover_b.exists()
+
+    def test_include_pdf_paths_none_legacy_scan_preserved(self, tmp_path):
+        """Legacy behavior: when include_pdf_paths is None (default), zip_output
+        scans output_dir for every .pdf (minus ZIP_PREFIX / IGNORED_). Backward
+        compat for existing callers, agent-contract tests, and any third-party
+        tooling that treats the output dir as authoritative.
+        """
+        from postprocess import zip_output
+        out = tmp_path / "batch"
+        out.mkdir()
+        pdfs = out / "pdfs"
+        pdfs.mkdir()
+        (pdfs / "a.pdf").write_bytes(b"%PDF a")
+        (pdfs / "b.pdf").write_bytes(b"%PDF b")
+        (out / "下载报告.md").write_text("r")
+        (out / "发票汇总.csv").write_text("c")
+
+        zp = zip_output(str(out))  # include_pdf_paths omitted = None
+        import zipfile
+        with zipfile.ZipFile(zp) as zf:
+            names = {os.path.basename(n) for n in zf.namelist()}
+        assert "a.pdf" in names
+        assert "b.pdf" in names
+
+    def test_include_pdf_paths_still_excludes_ignored_prefix(self, tmp_path):
+        """IGNORED_* exclusion is independent of include_pdf_paths — even if
+        an IGNORED path somehow lands in the whitelist, it still gets skipped
+        (defense in depth: the CTA-driven audit workflow should never ship
+        SaaS receipts to finance)."""
+        from postprocess import zip_output
+        out = tmp_path / "batch"
+        out.mkdir()
+        pdfs = out / "pdfs"
+        pdfs.mkdir()
+        legit = pdfs / "20251112_Marriott_水单.pdf"
+        ignored = pdfs / "IGNORED_termius_x.pdf"
+        legit.write_bytes(b"%PDF ok")
+        ignored.write_bytes(b"%PDF saas")
+        (out / "下载报告.md").write_text("r")
+        (out / "发票汇总.csv").write_text("c")
+
+        # Even if the caller accidentally passes an IGNORED path, zip must drop it.
+        zp = zip_output(
+            str(out),
+            include_pdf_paths={str(legit), str(ignored)},
+        )
+        import zipfile
+        with zipfile.ZipFile(zp) as zf:
+            names = {os.path.basename(n) for n in zf.namelist()}
+        assert "20251112_Marriott_水单.pdf" in names
+        assert "IGNORED_termius_x.pdf" not in names
+
+    def test_include_pdf_paths_empty_set_skips_all_pdfs(self, tmp_path):
+        """Edge case: whitelist is an empty set. No PDFs packaged. The manifest
+        check still fires on missing CSV/MD, but with them present the zip
+        succeeds with zero PDFs — a valid no-vouchers batch.
+        """
+        from postprocess import zip_output
+        out = tmp_path / "batch"
+        out.mkdir()
+        pdfs = out / "pdfs"
+        pdfs.mkdir()
+        (pdfs / "should-not-ship.pdf").write_bytes(b"%PDF")
+        (out / "下载报告.md").write_text("r")
+        (out / "发票汇总.csv").write_text("c")
+
+        zp = zip_output(str(out), include_pdf_paths=set())
+        import zipfile
+        with zipfile.ZipFile(zp) as zf:
+            names = {os.path.basename(n) for n in zf.namelist()}
+        # CSV + MD still packaged, but no PDFs.
+        assert "should-not-ship.pdf" not in names
+        assert any(n.endswith(".md") for n in names)
+        assert any(n.endswith(".csv") for n in names)
+
 
 # =============================================================================
 # #19 HIGH — CSV UTF-8 BOM + None-safe
