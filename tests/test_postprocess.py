@@ -3105,3 +3105,129 @@ class TestPromptContract:
         ]
         for s in required_substrings:
             assert s in prompt, f"Prompt missing required substring: {s!r}"
+
+
+class TestClassifyIgnored:
+    """Unit 1 R1: classify_invoice fallthrough returns IGNORED.
+
+    Termius-shape SaaS invoices (English docType, no Chinese tax ID,
+    no hotel fields, no service type match) fall through all priority
+    branches and must land on IGNORED, not UNKNOWN.
+    """
+
+    def test_empty_invoice_returns_ignored(self):
+        from core.classify import classify_invoice
+        assert classify_invoice({}) == "IGNORED"
+
+    def test_termius_shape_returns_ignored(self):
+        from core.classify import classify_invoice
+        invoice = {
+            "isChineseInvoice": False,
+            "vendorTaxId": None,
+            "docType": "Invoice",
+            "serviceType": None,
+            "vendorName": "Termius Corporation",
+            # No hotel fields
+        }
+        assert classify_invoice(invoice) == "IGNORED"
+
+    def test_stripe_like_with_balance_but_no_hotel_fields_ignored(self):
+        """The balance field alone must not gate a record into HOTEL_FOLIO.
+
+        Stripe/Termius invoices commonly surface "Amount due/Amount paid",
+        which LLMs may spill into 'balance'. Narrow gate must not trigger
+        on that single signal.
+        """
+        from core.classify import classify_invoice
+        invoice = {
+            "docType": "Statement",
+            "balance": 120.0,
+            "vendorName": "Stripe-like SaaS",
+        }
+        assert classify_invoice(invoice) == "IGNORED"
+
+    def test_chinese_meal_invoice_still_classifies_correctly(self):
+        """Regression: pre-existing MEAL path unaffected by fallthrough rename."""
+        from core.classify import classify_invoice
+        invoice = {
+            "isChineseInvoice": True,
+            "vendorTaxId": "91320214MA1XXXXXX",
+            "serviceType": "*餐饮服务*餐饮费",
+            "docType": "电子发票（普通发票）",
+        }
+        assert classify_invoice(invoice) == "MEAL"
+
+
+class TestHotelFolioNarrowGate:
+    """Unit 1 R1: is_hotel_folio_by_doctype narrow gate requires >=2
+    of {hotelName, confirmationNo, internalCodes, roomNumber}.
+
+    balance is deliberately NOT in the set (SaaS "Amount due" conflict).
+    arrivalDate/departureDate are deliberately NOT in the set
+    (Unit 0 prompt layer handles subscription-range leakage).
+    """
+
+    def test_two_fields_pass_narrow_gate(self):
+        from core.classify import classify_invoice
+        invoice = {
+            "docType": "Statement",
+            "hotelName": "Marriott Shanghai",
+            "confirmationNo": "86690506",
+        }
+        assert classify_invoice(invoice) == "HOTEL_FOLIO"
+
+    def test_one_field_fails_narrow_gate(self):
+        from core.classify import classify_invoice
+        invoice = {
+            "docType": "Statement",
+            "hotelName": "Marriott Shanghai",
+            # Only 1 field — should fall through to IGNORED
+        }
+        assert classify_invoice(invoice) == "IGNORED"
+
+    def test_termius_single_field_hallucination_still_ignored(self):
+        """LLM might fill hotelName with 'Termius Corporation'. Single
+        field is not enough to pass the gate.
+        """
+        from core.classify import classify_invoice
+        invoice = {
+            "docType": "Invoice",
+            "hotelName": "Termius Corporation",
+        }
+        assert classify_invoice(invoice) == "IGNORED"
+
+    def test_guest_folio_with_balance_only_is_ignored(self):
+        """balance is NOT in the narrow-gate field set. A folio that
+        arrives with only balance filled falls through to IGNORED.
+        Previous 5-field proposal (with balance) is deliberately rejected
+        — see brainstorm 2026-05-02 for rationale.
+        """
+        from core.classify import classify_invoice
+        invoice = {
+            "docType": "Guest Folio",
+            "balance": 1260.0,
+        }
+        assert classify_invoice(invoice) == "IGNORED"
+
+    def test_room_and_confirmation_pass(self):
+        from core.classify import classify_invoice
+        invoice = {
+            "docType": "Statement",
+            "roomNumber": "1205",
+            "confirmationNo": "86690506",
+        }
+        assert classify_invoice(invoice) == "HOTEL_FOLIO"
+
+    def test_fields_path_still_works_unchanged(self):
+        """is_hotel_folio_by_fields 3-choose-2 of roomNumber/arrivalDate/
+        departureDate is untouched by Unit 1; legit folios go through this
+        path unaffected.
+        """
+        from core.classify import classify_invoice
+        invoice = {
+            "docType": "any",  # docType narrow gate not reached
+            "roomNumber": "1205",
+            "arrivalDate": "2025-11-12",
+            "departureDate": "2025-11-13",
+        }
+        assert classify_invoice(invoice) == "HOTEL_FOLIO"
