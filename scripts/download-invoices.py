@@ -1596,6 +1596,9 @@ def main():
             f"AGENT_HINT: run_supplemental "
             f"--start {args.start} --end {args.end} "
             f"--output {shlex.quote(os.path.abspath(args.output))}\n"
+            f"REMEDIATION: initial run deferred to supplemental — "
+            f"run the AGENT_HINT command above to deliver the chat summary "
+            f"and final zip to the user.\n"
         )
         log.close()
         sys.exit(EXIT_PARTIAL)

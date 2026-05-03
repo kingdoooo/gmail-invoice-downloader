@@ -1471,6 +1471,8 @@ class TestRunSupplementalSilence:
         captured = capsys.readouterr()
         assert excinfo.value.code == 5, f"expected exit 5, got {excinfo.value.code}"
         assert "AGENT_HINT: run_supplemental" in captured.err
+        assert "REMEDIATION:" in captured.err, \
+            "CLAUDE.md contract: every non-zero exit must emit REMEDIATION: on stderr"
         assert "CHAT_MESSAGE_START" not in captured.out
         assert "CHAT_MESSAGE_END" not in captured.out
         assert "CHAT_ATTACHMENTS:" not in captured.out
