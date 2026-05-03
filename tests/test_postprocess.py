@@ -3832,3 +3832,23 @@ class TestOutputDirPreflight:
         result = inspect(str(tmp_path))
         assert result["has_state"] is True
         assert result["is_empty"] is False
+
+
+class TestCurrencyPromptContract:
+    """Unit A: OCR prompt must declare `currency` field and example values."""
+
+    def test_prompt_declares_currency_field(self):
+        from core.prompts import get_ocr_prompt
+        prompt = get_ocr_prompt()
+        assert "| currency |" in prompt, "currency 行必须在通用字段表"
+        assert "ISO-4217" in prompt or "ISO 4217" in prompt, \
+            "说明必须引用 ISO-4217 三字母码标准"
+        assert "CNY" in prompt and "USD" in prompt, \
+            "示例币种必须覆盖 CNY / USD"
+
+    def test_prompt_examples_include_cny_default(self):
+        from core.prompts import get_ocr_prompt
+        prompt = get_ocr_prompt()
+        # 3 段 example JSON 至少各有一处 "currency": "CNY"
+        assert prompt.count('"currency": "CNY"') >= 3, \
+            "电子发票 / 酒店水单 / 网约车 3 段 example 都要列 currency=CNY"
