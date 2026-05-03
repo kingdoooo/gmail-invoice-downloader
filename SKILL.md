@@ -744,20 +744,20 @@ python3 scripts/probe-platform.py "https://新平台.com/xxx"
 - **feat(contract):** `main()` 两个 `print_openclaw_summary` 调用前加守门分支 —— `not args.supplemental and missing_status == "run_supplemental"` → `sys.stderr.write("AGENT_HINT: run_supplemental ...\nREMEDIATION: ...\n")` + `sys.exit(EXIT_PARTIAL)`。不发哨兵不发附件。补搜这次仍发哨兵（防 max_iterations 用户沉默）。exit 5 复用，不加 exit 6 —— 子语义差异由 stderr 哨兵表达。`REMEDIATION:` 与 `AGENT_HINT:` 成对出现，保障 CLAUDE.md 既有 "每次非零退出必有 REMEDIATION:" 合约不破。
 - **docs(SKILL):** §Exit Codes exit=5 行注解扩充；§Agent Playbook 加守则 0（sentinel absence is valid）；§Invariants 松绑成 "at most once, may be zero"；§Loop Playbook 追加 v5.8 note；新增 §User Reply Conventions 规范 "加 `<domain>`" 回复落地。
 
-### Agent 合约变化
+**Agent 合约变化**：
 
 - **`missing.json` schema 不动**（仍 1.0，不加 `ignored_count` 顶层）。
 - **`CHAT_MESSAGE_*` / `CHAT_ATTACHMENTS:` 可以为零**（新增情境：初运行 `run_supplemental` 延迟）。Agents 必须先检查 sentinel 存在性再决定是否转发。
 - **新 stderr 哨兵 `AGENT_HINT: run_supplemental ...`**：出现时 Skill stdout 为空，Agent 按该行指令继续，不向用户转发任何东西。仍伴随 `REMEDIATION: ...`，兼容 pre-v5.8 Agent 的 `REMEDIATION:` 模式匹配。
 - **新用户回复约定**：`加 <domain>` → Agent 写 `learned_exclusions.json`，Skill 不碰。
 
-### 不要再做
+**不要再做**：
 
-- **不要** 在 §IGNORED 渲染里硬编 `¥` 前缀——永远通过 `currency_symbol()` 查表。未来加新币种（KRW/TWD/AUD/...）只需改 `_CURRENCY_SYMBOLS` dict。
-- **不要** 在 `_ignored_summary` 里按金额排序主 sender —— "主要来自" 是按记录条数，不是按金额（同金额大小的 10 张 vs 1 张，大部分用户直觉选 10 张）。
-- **不要** 为 `run_supplemental` 静默分支新建 exit code 6。现有 exit 5 + stderr `AGENT_HINT:` 区分子语义已经够；新 exit code 会破坏 Agent 已有的 exit 表匹配逻辑。
-- **不要** 在 Skill 里加 "占位消息" 逻辑（"正在补搜..."）。静默期间的 UX 兜底属 Agent 职责，SKILL.md §Loop Playbook 建议但不强制。
-- **不要** 让 Skill 自动写 `learned_exclusions.json`。保持 Skill 纯函数语义，可重放；用户决策面的文件只归 Agent。
+- 在 §IGNORED 渲染里硬编 `¥` 前缀——永远通过 `currency_symbol()` 查表。未来加新币种（KRW/TWD/AUD/...）只需改 `_CURRENCY_SYMBOLS` dict。
+- 在 `_ignored_summary` 里按金额排序主 sender —— "主要来自" 是按记录条数，不是按金额（同金额大小的 10 张 vs 1 张，大部分用户直觉选 10 张）。
+- 为 `run_supplemental` 静默分支新建 exit code 6。现有 exit 5 + stderr `AGENT_HINT:` 区分子语义已经够；新 exit code 会破坏 Agent 已有的 exit 表匹配逻辑。
+- 在 Skill 里加 "占位消息" 逻辑（"正在补搜..."）。静默期间的 UX 兜底属 Agent 职责，SKILL.md §Loop Playbook 建议但不强制。
+- 让 Skill 自动写 `learned_exclusions.json`。保持 Skill 纯函数语义，可重放；用户决策面的文件只归 Agent。
 
 ### 🟢 v5.7 — IGNORED 白名单分类 + 非报销票据过滤（双层防御）
 
