@@ -40,6 +40,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import ssl
 import subprocess
@@ -71,6 +72,7 @@ from invoice_helpers import (  # noqa: E402
 from postprocess import (  # noqa: E402
     analyze_pdf_batch,
     build_aggregation,
+    currency_symbol,
     rename_by_ocr,
     do_all_matching,
     print_openclaw_summary,
@@ -751,11 +753,9 @@ def write_report_md(
                 amount = float(raw_amount) if raw_amount not in (None, "") else None
             except (TypeError, ValueError):
                 amount = None
-            currency = ocr.get("currency") or ""
             if amount is not None:
-                prefix = "¥" if not currency or currency == "CNY" else ""
-                suffix = f" {currency}" if currency and currency != "CNY" else ""
-                lines.append(f"- {label}：{prefix}{amount:.2f}{suffix}")
+                sym = currency_symbol(ocr.get("currency"))
+                lines.append(f"- {label}：{sym}{amount:.2f}")
             else:
                 lines.append(f"- {label}：金额未识别")
         lines.append("")
@@ -1140,7 +1140,7 @@ def _run_postprocess_only(
         missing_status=missing_payload["recommended_next_action"],
         date_range=(run_start_date or "?", run_end_date or "?"),
         writer=say,
-        ignored_count=len(ignored_records),
+        ignored_records=ignored_records,
     )
 
     # --- Exit semantics ---
@@ -1582,6 +1582,27 @@ def main():
 
     say(f"\n✅ PDFs:     {pdfs_dir}/ ({sum(1 for d in downloaded_all if d.get('valid'))} files)")
 
+    # --- v5.8 Unit C: silent run_supplemental deferral ---
+    # Initial run (not --supplemental) with recommended_next_action ==
+    # "run_supplemental" emits NO user-facing output. The Agent reads the
+    # AGENT_HINT from stderr, runs the supplemental command, and only THAT
+    # run's print_openclaw_summary delivers CHAT_MESSAGE_*/CHAT_ATTACHMENTS
+    # to the user. Prevents the user from receiving two zips (an incomplete
+    # one now + a complete one after supplemental) whose CSV/MD/zip contents
+    # differ.
+    if (not args.supplemental
+            and missing_payload["recommended_next_action"] == "run_supplemental"):
+        sys.stderr.write(
+            f"AGENT_HINT: run_supplemental "
+            f"--start {args.start} --end {args.end} "
+            f"--output {shlex.quote(os.path.abspath(args.output))}\n"
+            f"REMEDIATION: initial run deferred to supplemental — "
+            f"run the AGENT_HINT command above to deliver the chat summary "
+            f"and final zip to the user.\n"
+        )
+        log.close()
+        sys.exit(EXIT_PARTIAL)
+
     # --- Step 11: OpenClaw chat summary (stdout + run.log). MUST be called
     #     before log.close() — writer=say dual-writes to the still-open log.
     say("")
@@ -1595,7 +1616,7 @@ def main():
         missing_status=missing_payload["recommended_next_action"],
         date_range=(args.start, args.end),
         writer=say,
-        ignored_count=len(ignored_records),
+        ignored_records=ignored_records,
     )
 
     # --- Exit code ---

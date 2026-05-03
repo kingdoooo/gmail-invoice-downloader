@@ -2,6 +2,36 @@
 
 本项目的版本声明仅在 `SKILL.md` 第 1 行（`# Gmail Invoice Downloader (vX.Y)`）。下方记录每个版本的发布说明；最新版本在最上面。
 
+## v5.8 — 货币感知的 IGNORED 摘要 + run_supplemental 静默分支 (2026-05-03)
+
+**动机**：2025Q1 批次复盘三个独立但互相牵扯的问题：USD Anthropic 账单在 §IGNORED 显示 `¥10.00`；摘要里 `📭 已忽略 N 张（详见 MD）` 信息太少用户不翻 MD 看不到 sender + CTA；`status=needs_retry` 时 Skill 发一次中间 zip，Agent 跑补搜后又发一次最终 zip，用户收到 2 份交付物前者作废（CSV/MD/zip 均会变）。
+
+- **feat(prompts):** OCR 通用字段表新增 `currency` 字段（ISO-4217，默认 CNY）；3 段 example JSON 各加 `"currency": "CNY"` 锚定 LLM 输出（Unit A.1）。
+- **feat(llm_ocr):** `extract_from_bytes` 出口 defensive fill `currency=CNY`，含老 cache 命中路径（Unit A.2）。cache key 不含 prompt，老 cache 仍命中；`"currency"` 字段由出口兜底保证存在。
+- **feat(postprocess):** 顶层加 `_CURRENCY_SYMBOLS` + `currency_symbol()` 查表（CNY/USD/EUR/GBP/JPY/HKD，未知码 `"{CODE} "` fallback）（Unit A.3）。`_ignored_summary()` helper 聚合 IGNORED 记录成 `(totals_by_currency, top_domain, top_count)`（Unit B.1）。`print_openclaw_summary` 参数 `ignored_count: int` → `ignored_records: list[dict] | None`；摘要 IGNORED 行换成 2 行"总金额 + 主 sender + 回复 CTA"，多币种 `/` 分隔字母序，`top_domain="未知发件人"` 时省 CTA（Unit B.2）。
+- **feat(report):** `write_report_md` §已忽略 渲染从硬编 `¥` 切 `currency_symbol()`，USD 账单现在正确显示 `$10.00`（Unit A.4）。
+- **feat(contract):** `main()` 新增守门分支 —— 非 `--supplemental` 初运行 + `recommended_next_action=="run_supplemental"` → stderr 打 `AGENT_HINT: run_supplemental ...` + `REMEDIATION: ...` + `sys.exit(EXIT_PARTIAL)`；跳过 `print_openclaw_summary`，不发哨兵不发附件。补搜那次仍发哨兵（防 max_iterations 用户沉默）。exit 5 复用，不加 exit 6 —— 子语义由 stderr 哨兵表达。`REMEDIATION:` 与 `AGENT_HINT:` 成对出现，保障 CLAUDE.md 既有"每次非零退出必有 REMEDIATION:"合约不破（Unit C.1）。
+- **docs(SKILL):** 更新 4 节（§Exit Codes / §Presenting Results / §Invariants / §Loop Playbook）+ 新增 §User Reply Conventions + §Lessons Learned v5.8（Unit C.2）。§User Reply Conventions 规范 "加 `<domain>`" 用户回复 → Agent 在 `<skill_dir>/learned_exclusions.json` 追加 `{"rule": "-from:<domain>", "reason": "user approved", "confirmed": "<YYYY-MM-DD>"}` 到 `exclusions: []` 数组；只在最近一次转发的摘要含 CTA 时触发（防止 Agent 对无关消息误操作）。
+- **test(suite):** 318 passed（v5.7.2 为 292，+26 新测试）。新增 `TestCurrencyPromptContract` / `TestCurrencyDefensiveFill` / `TestCurrencySymbolTable` / `TestIgnoredSummaryHelper` / `TestIgnoredMdRenderingCurrency` / `TestPrintOpenClawSummary::test_ignored_line_*`（6 个新 method）/ `TestRunSupplementalSilence`。
+
+### Agent 合约变化
+
+- **`missing.json` schema 不动**（仍 `"1.0"`，不加 `ignored_count` 顶层字段）。
+- **`CHAT_MESSAGE_*` / `CHAT_ATTACHMENTS:` 可以为零**。初运行 `run_supplemental` 延迟路径下 Skill stdout 为空，Agent 必须先检查 sentinel 存在性再决定是否转发。
+- **新 stderr 哨兵 `AGENT_HINT: run_supplemental ...`**（成对伴随 `REMEDIATION: ...`）。出现时 Agent 不转发任何东西，按 `AGENT_HINT:` 指令跑补搜。
+- **新用户回复约定 `加 <domain>`**：Agent 在 `<skill_dir>/learned_exclusions.json` 的 `exclusions[]` 数组追加新规则；Skill 不碰。
+
+### 不受影响
+
+- `scripts/core/matching.py` / `scripts/core/classify.py` / `scripts/invoice_helpers.py` 不动。
+- reimbursable 发票（酒店 / 餐饮 / 网约车）仍然全 `¥`，aggregation / CSV / 主 zip 结构不变。
+- 既有 `zip_output` / `rename_by_ocr` / `build_aggregation` / `missing.json` writer 行为不变。
+
+### 升级备注
+
+- 开发阶段单用户，不主动清 `~/.cache/gmail-invoice-downloader/ocr/`。老 cache 自动被 defensive fill 兜底成 `currency=CNY`，不会崩溃；只有 pre-v5.8 的 IGNORED Anthropic cache 命中时会继续显示 `¥`。下次同一 PDF 重新跑（或手工 `rm` 对应 cache 条目）即正确。
+- `print_openclaw_summary` 的 `ignored_count: int` kwarg 已移除，改为 `ignored_records: list[dict] | None`。所有 in-repo call sites 本次都一并更新，外部 vendoring 本 skill 的调用方需要同步迁移。
+
 ## v5.7.2 — output_dir preflight + Agent 新目录指引 (2026-05-03)
 
 **动机**：v5.7.1 解决了 zip **包含** 跨批次残留的问题（白名单过滤），但 `pdfs/` 目录本身仍会因反复复用 `--output` 而累积文件——用户开 Finder 看到满目"(1)""(2)"后缀仍然困惑。正确的解法是从**上游**阻止这种复用：Agent 每次新跑构造新目录。

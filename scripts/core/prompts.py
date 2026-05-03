@@ -25,6 +25,7 @@ def get_ocr_prompt() -> str:
 | docType | string | 文档类型，如 "电子发票（普通发票）", "电子发票（增值税专用发票）", "Guest Folio", "INFORMATION INVOICE", "INFORMATION BILL", "行程单", "行程报销单", "出租汽车发票" |
 | invoiceNo | string | 发票号码（中国电子发票右上角"发票号码"后的 20 位数字，例："25327000001619791763"）。不是 invoiceCode。水单/行程单等非税务发票无此字段时返回 null |
 | isChineseInvoice | boolean | 是否为中国增值税发票, 有发票印章（税务局）, 发票号码, 销售方/购买方信息, 统一社会信用代码 |
+| currency | string | ISO-4217 三字母币种代码。大陆增值税发票/普票/电子发票 = "CNY"；美元账单 = "USD"；欧元 = "EUR"；未写明或识别不出 → 返回 "CNY"（保守默认，避免误改人民币发票）|
 
 ## ⚠️ 重要规则：购买方/销售方区分
 
@@ -168,6 +169,7 @@ Rationale: downstream classifier uses these fields to distinguish hotel folios f
   "vendorTaxId": "91320214MA1XXXXXX",
   "serviceType": "*餐饮服务*餐饮费",
   "docType": "电子发票（普通发票）",
+  "currency": "CNY",
   "isChineseInvoice": true
 }
 ```
@@ -182,7 +184,8 @@ Rationale: downstream classifier uses these fields to distinguish hotel folios f
   "departureDate": "2025-05-08",
   "transactionDate": "2025-05-08",
   "balance": 583.97,
-  "confirmationNo": "4329092847491260840"
+  "confirmationNo": "4329092847491260840",
+  "currency": "CNY"
 }
 ```
 
@@ -196,7 +199,8 @@ Rationale: downstream classifier uses these fields to distinguish hotel folios f
   "transactionDate": "2025-12-09",
   "totalAmount": 245.50,
   "tripCount": 12,
-  "city": "南京"
+  "city": "南京",
+  "currency": "CNY"
 }
 ```
 

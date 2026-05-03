@@ -56,6 +56,78 @@ from core.validation import _parse_ocr_date, validate_ocr_plausibility
 
 
 # =============================================================================
+# Currency symbols (v5.8 Unit A.3)
+# =============================================================================
+# Maps ISO-4217 three-letter codes to display prefixes used in §IGNORED MD
+# and the OpenClaw chat summary's IGNORED line. Unknown codes fall back to
+# "{CODE} " so weird LLM output never silently becomes ¥.
+
+_CURRENCY_SYMBOLS = {
+    "CNY": "¥",
+    "USD": "$",
+    "EUR": "€",
+    "GBP": "£",
+    "JPY": "¥",
+    "HKD": "HK$",
+}
+
+
+def currency_symbol(code) -> str:
+    """Return the display prefix for an ISO-4217 code.
+
+    None / empty / lowercase are all normalized. Unknown codes return
+    `"{UPPER} "` (trailing space preserved so the caller can concatenate
+    directly with the amount).
+    """
+    key = (code or "CNY").upper()
+    if key in _CURRENCY_SYMBOLS:
+        return _CURRENCY_SYMBOLS[key]
+    return key + " "
+
+
+def _ignored_summary(records):
+    """Aggregate IGNORED records for the summary line.
+
+    Returns:
+        (totals_by_currency, top_domain, top_count)
+        where totals_by_currency is dict[str, float], keyed by ISO-4217
+        code (defaults to "CNY" if missing); unconvertible amounts contribute
+        0.0 but still create the currency bucket so the symbol remains visible
+        in the rendered line.
+
+        top_domain is the most common sender email domain across records
+        ('未知发件人' for entries without a valid from: header). Ties break
+        by dict insertion order (first seen wins) — intentional YAGNI.
+
+    This helper is pure (no I/O, no printing). The summary renderer
+    (print_openclaw_summary) formats the tuple into display strings.
+    """
+    totals = {}
+    domain_counts = {}
+    for rec in records:
+        ocr = rec.get("ocr") or {}
+        raw_amt = ocr.get("transactionAmount")
+        try:
+            amt = float(raw_amt) if raw_amt not in (None, "") else 0.0
+        except (TypeError, ValueError):
+            amt = 0.0
+        cur = (ocr.get("currency") or "CNY").upper()
+        totals[cur] = totals.get(cur, 0.0) + amt
+
+        sender = rec.get("sender_email") or ""
+        if "@" in sender:
+            domain = sender.split("@", 1)[-1]
+        else:
+            domain = "未知发件人"
+        domain_counts[domain] = domain_counts.get(domain, 0) + 1
+
+    top_domain, top_count = max(
+        domain_counts.items(), key=lambda kv: kv[1],
+    )
+    return totals, top_domain, top_count
+
+
+# =============================================================================
 # Category labels for filenames / CSV
 # =============================================================================
 
@@ -1124,7 +1196,7 @@ def print_openclaw_summary(
     missing_status: str,
     date_range: Tuple[str, str],
     writer: Callable[[str], None] = print,
-    ignored_count: int = 0,  # v5.7 Unit 4
+    ignored_records=None,  # v5.8 Unit B (replaces ignored_count)
 ) -> None:
     """Render a ≤20-line summary to stdout (and optionally run.log via writer).
 
@@ -1137,6 +1209,10 @@ def print_openclaw_summary(
 
     Raises ValueError if ``missing_status`` is not one of
     ``_MISSING_STATUSES`` (DEC-7: fail-fast on unknown enum).
+
+    ``ignored_records`` is the list of records that got IGNORED_ prefix
+    filenames. When non-empty, emits a 2-line 📭 block: totals-by-currency
+    + top sender + reply-to-add-exclusion CTA. None or [] emits nothing.
     """
     if missing_status not in _MISSING_STATUSES:
         raise ValueError(
@@ -1226,12 +1302,29 @@ def print_openclaw_summary(
         )
     else:  # ask_user
         writer(f"👉 下一步：需人工核查 — 见 {abs_md} 末尾「⚠️ 需人工核查」区")
-    # 9.5. v5.7 Unit 4: IGNORED count line (only if any were filtered)
-    if ignored_count:
-        writer(
-            f"📭 已忽略 {ignored_count} 张非报销票据"
-            f"（详见下载报告.md §已忽略的非报销票据）"
+    # 9.5. v5.8 Unit B: IGNORED summary — totals-by-currency + top sender + CTA.
+    # If all records lack a parseable sender domain, suppress the CTA (a reply
+    # of "加 未知发件人" would be useless) and collapse to one line.
+    if ignored_records:
+        totals, top_domain, _top_count = _ignored_summary(ignored_records)
+        total_str = " / ".join(
+            f"{currency_symbol(cur)}{amt:.2f}"
+            for cur, amt in sorted(totals.items())
         )
+        if top_domain != "未知发件人":
+            writer(
+                f"📭 已忽略 {len(ignored_records)} 张非报销票据"
+                f"（{total_str}，主要来自 {top_domain}）"
+            )
+            writer(
+                f'   加过滤规则？回复 "加 {top_domain}" '
+                f"我帮你写进 learned_exclusions.json"
+            )
+        else:
+            writer(
+                f"📭 已忽略 {len(ignored_records)} 张非报销票据"
+                f"（{total_str}）"
+            )
     # 10. Blank
     writer("")
     # 11. Deliverables

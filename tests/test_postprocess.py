@@ -3243,11 +3243,11 @@ class TestPrintOpenClawSummary:
             f"but lines after it: {lines[end_idx+1:]}"
         )
 
-    # -- Unit 4 R3: ignored_count line (v5.7) -----------------------------
+    # -- Unit 4 R3: ignored_records line (v5.7 → rewritten for v5.8) ------
 
     def test_ignored_count_line_rendered_when_nonzero(self):
-        """Unit 4 R3: print_openclaw_summary emits '📭 已忽略 N 张非报销票据'
-        when ignored_count > 0.
+        """Unit 4 R3 (v5.8 rewrite): print_openclaw_summary emits
+        '📭 已忽略 N 张非报销票据' when ignored_records is non-empty.
         """
         from postprocess import print_openclaw_summary
         aggregation = {
@@ -3260,6 +3260,14 @@ class TestPrintOpenClawSummary:
             "grand_total": 100.0,
         }
         lines = []
+        ignored = [
+            {"sender_email": "noreply@saas.example.com",
+             "ocr": {"transactionAmount": 10.0, "currency": "USD"}},
+            {"sender_email": "noreply@saas.example.com",
+             "ocr": {"transactionAmount": 20.0, "currency": "USD"}},
+            {"sender_email": "noreply@saas.example.com",
+             "ocr": {"transactionAmount": 30.0, "currency": "USD"}},
+        ]
         print_openclaw_summary(
             aggregation,
             output_dir="/tmp/out",
@@ -3270,7 +3278,7 @@ class TestPrintOpenClawSummary:
             missing_status="stop",
             date_range=("2025/01/01", "2025/03/31"),
             writer=lines.append,
-            ignored_count=3,
+            ignored_records=ignored,
         )
         text = "\n".join(lines)
         assert "📭 已忽略 3 张非报销票据" in text
@@ -3297,10 +3305,98 @@ class TestPrintOpenClawSummary:
             missing_status="stop",
             date_range=("2025/01/01", "2025/03/31"),
             writer=lines.append,
-            ignored_count=0,
+            ignored_records=[],
         )
         text = "\n".join(lines)
         assert "已忽略" not in text
+
+    # -- v5.8 Unit B: IGNORED summary line (totals + top sender + CTA) ----
+
+    def _ignored_usd_records(self):
+        return [
+            {"sender_email": "invoice+statements@mail.anthropic.com",
+             "ocr": {"transactionAmount": 10.0, "currency": "USD"}},
+            {"sender_email": "invoice+statements@mail.anthropic.com",
+             "ocr": {"transactionAmount": 20.0, "currency": "USD"}},
+        ]
+
+    def test_ignored_line_shows_total_and_top_sender(self, tmp_path):
+        agg = self._populated_agg()
+        lines = self._capture(
+            aggregation=agg, **self._default_paths(tmp_path),
+            missing_status="stop", date_range=("2026/04/01", "2026/04/30"),
+            ignored_records=self._ignored_usd_records(),
+        )
+        text = "\n".join(lines)
+        assert "📭 已忽略 2 张非报销票据" in text
+        assert "$30.00" in text
+        assert "主要来自 mail.anthropic.com" in text
+
+    def test_ignored_line_shows_cta_with_domain(self, tmp_path):
+        agg = self._populated_agg()
+        lines = self._capture(
+            aggregation=agg, **self._default_paths(tmp_path),
+            missing_status="stop", date_range=("2026/04/01", "2026/04/30"),
+            ignored_records=self._ignored_usd_records(),
+        )
+        text = "\n".join(lines)
+        assert '加 mail.anthropic.com' in text
+        assert "learned_exclusions.json" in text
+
+    def test_ignored_line_mixed_currency_sorted(self, tmp_path):
+        agg = self._populated_agg()
+        recs = [
+            {"sender_email": "a@foo.com",
+             "ocr": {"transactionAmount": 5.0, "currency": "CNY"}},
+            {"sender_email": "a@foo.com",
+             "ocr": {"transactionAmount": 10.0, "currency": "USD"}},
+        ]
+        lines = self._capture(
+            aggregation=agg, **self._default_paths(tmp_path),
+            missing_status="stop", date_range=("2026/04/01", "2026/04/30"),
+            ignored_records=recs,
+        )
+        text = "\n".join(lines)
+        # Sorted alphabetically by currency code: CNY < USD
+        assert "¥5.00 / $10.00" in text
+
+    def test_ignored_line_absent_when_empty(self, tmp_path):
+        agg = self._populated_agg()
+        lines = self._capture(
+            aggregation=agg, **self._default_paths(tmp_path),
+            missing_status="stop", date_range=("2026/04/01", "2026/04/30"),
+            ignored_records=[],
+        )
+        text = "\n".join(lines)
+        assert "📭" not in text
+
+    def test_ignored_line_absent_when_none(self, tmp_path):
+        agg = self._populated_agg()
+        lines = self._capture(
+            aggregation=agg, **self._default_paths(tmp_path),
+            missing_status="stop", date_range=("2026/04/01", "2026/04/30"),
+            # No ignored_records kwarg at all → defaults to None
+        )
+        text = "\n".join(lines)
+        assert "📭" not in text
+
+    def test_ignored_line_unknown_sender_suppresses_cta(self, tmp_path):
+        agg = self._populated_agg()
+        recs = [
+            {"sender_email": "",
+             "ocr": {"transactionAmount": 1.0, "currency": "CNY"}},
+        ]
+        lines = self._capture(
+            aggregation=agg, **self._default_paths(tmp_path),
+            missing_status="stop", date_range=("2026/04/01", "2026/04/30"),
+            ignored_records=recs,
+        )
+        text = "\n".join(lines)
+        # First line still present (count + total), but no CTA reply hint
+        assert "📭 已忽略 1 张非报销票据" in text
+        assert "¥1.00" in text
+        assert "加 未知发件人" not in text
+        assert "主要来自" not in text
 
 
 class TestPromptContract:
@@ -3832,3 +3928,273 @@ class TestOutputDirPreflight:
         result = inspect(str(tmp_path))
         assert result["has_state"] is True
         assert result["is_empty"] is False
+
+
+class TestCurrencyPromptContract:
+    """Unit A: OCR prompt must declare `currency` field and example values."""
+
+    def test_prompt_declares_currency_field(self):
+        from core.prompts import get_ocr_prompt
+        prompt = get_ocr_prompt()
+        assert "| currency |" in prompt, "currency 行必须在通用字段表"
+        assert "ISO-4217" in prompt or "ISO 4217" in prompt, \
+            "说明必须引用 ISO-4217 三字母码标准"
+        assert "CNY" in prompt and "USD" in prompt, \
+            "示例币种必须覆盖 CNY / USD"
+
+    def test_prompt_examples_include_cny_default(self):
+        from core.prompts import get_ocr_prompt
+        prompt = get_ocr_prompt()
+        # 3 段 example JSON 至少各有一处 "currency": "CNY"
+        assert prompt.count('"currency": "CNY"') >= 3, \
+            "电子发票 / 酒店水单 / 网约车 3 段 example 都要列 currency=CNY"
+
+
+class TestCurrencyDefensiveFill:
+    """Unit A: extract_from_bytes guarantees currency field presence."""
+
+    def test_missing_currency_defaults_to_cny(self, tmp_path, monkeypatch):
+        from core import llm_ocr
+
+        # Stub extract_with_retry to return LLM output without `currency`.
+        monkeypatch.setattr(
+            llm_ocr, "extract_with_retry",
+            lambda pdf, prompt, client: '{"transactionAmount": 100.0, "vendorName": "T"}',
+        )
+        # Stub get_client to bypass provider init.
+        class _FakeClient:
+            provider_name = "anthropic"
+        monkeypatch.setattr(llm_ocr, "get_client", lambda: _FakeClient())
+
+        result = llm_ocr.extract_from_bytes(
+            b"%PDF-fake", use_cache=False, cache_dir=tmp_path,
+        )
+        assert result.get("currency") == "CNY"
+
+    def test_empty_currency_is_normalized_to_cny(self, tmp_path, monkeypatch):
+        from core import llm_ocr
+        monkeypatch.setattr(
+            llm_ocr, "extract_with_retry",
+            lambda pdf, prompt, client: '{"transactionAmount": 1, "currency": ""}',
+        )
+        class _FakeClient:
+            provider_name = "anthropic"
+        monkeypatch.setattr(llm_ocr, "get_client", lambda: _FakeClient())
+
+        result = llm_ocr.extract_from_bytes(
+            b"%PDF-fake2", use_cache=False, cache_dir=tmp_path,
+        )
+        assert result.get("currency") == "CNY"
+
+    def test_old_cache_without_currency_gets_filled(self, tmp_path):
+        from core import llm_ocr
+        import json, hashlib
+
+        pdf_bytes = b"%PDF-old-cache"
+        # Seed a cache entry that predates v5.8 (no `currency` field).
+        tmp_path.mkdir(exist_ok=True)
+        digest = hashlib.sha256(pdf_bytes).hexdigest()[:16]
+        cache_file = tmp_path / f"{digest}.json"
+        cache_file.write_text(json.dumps({
+            "ocr": {"transactionAmount": 50.0, "vendorName": "legacy"},
+            "schema_version": "1.0",
+        }), encoding="utf-8")
+
+        result = llm_ocr.extract_from_bytes(
+            pdf_bytes, use_cache=True, cache_dir=tmp_path,
+        )
+        assert result.get("currency") == "CNY"
+
+    def test_explicit_usd_is_preserved(self, tmp_path, monkeypatch):
+        from core import llm_ocr
+        monkeypatch.setattr(
+            llm_ocr, "extract_with_retry",
+            lambda pdf, prompt, client: '{"transactionAmount": 10, "currency": "USD"}',
+        )
+        class _FakeClient:
+            provider_name = "anthropic"
+        monkeypatch.setattr(llm_ocr, "get_client", lambda: _FakeClient())
+
+        result = llm_ocr.extract_from_bytes(
+            b"%PDF-usd", use_cache=False, cache_dir=tmp_path,
+        )
+        assert result.get("currency") == "USD"
+
+
+class TestCurrencySymbolTable:
+    """Unit A: currency_symbol maps ISO-4217 codes to display symbols.
+
+    Contract:
+      - Known codes → short symbol (¥/$/€/£ etc.)
+      - Unknown codes → "{CODE} " (uppercase + trailing space)
+      - None / empty → ¥ (CNY fallback)
+      - Case-insensitive input
+    """
+
+    def test_known_codes(self):
+        from postprocess import currency_symbol
+        assert currency_symbol("CNY") == "¥"
+        assert currency_symbol("USD") == "$"
+        assert currency_symbol("EUR") == "€"
+        assert currency_symbol("GBP") == "£"
+        assert currency_symbol("JPY") == "¥"
+        assert currency_symbol("HKD") == "HK$"
+
+    def test_unknown_code_preserves_as_prefix(self):
+        from postprocess import currency_symbol
+        # Hallucinated / malformed code: fallback to uppercase + space
+        assert currency_symbol("RMB") == "RMB "
+        assert currency_symbol("XYZ") == "XYZ "
+
+    def test_none_is_cny(self):
+        from postprocess import currency_symbol
+        assert currency_symbol(None) == "¥"
+
+    def test_empty_string_is_cny(self):
+        from postprocess import currency_symbol
+        assert currency_symbol("") == "¥"
+
+    def test_lowercase_input(self):
+        from postprocess import currency_symbol
+        assert currency_symbol("usd") == "$"
+        assert currency_symbol("cny") == "¥"
+
+
+class TestIgnoredMdRenderingCurrency:
+    """Unit A.4: §IGNORED MD renders the correct currency symbol per record."""
+
+    @staticmethod
+    def _invoke_md(tmp_path, ignored_records):
+        """Invoke write_report_md with minimal aggregation so we can read back
+        the §IGNORED section without touching the matching pipeline."""
+        # write_report_md is in scripts/download-invoices.py (hyphenated). Import
+        # via importlib to sidestep the filename hyphen.
+        import importlib.util, sys, pathlib
+        root = pathlib.Path(__file__).parent.parent
+        spec = importlib.util.spec_from_file_location(
+            "dl_cli",
+            root / "scripts" / "download-invoices.py",
+        )
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["dl_cli"] = mod
+        spec.loader.exec_module(mod)
+
+        from postprocess import do_all_matching, build_aggregation
+        matching = do_all_matching([])
+        agg = build_aggregation(matching, [])
+        md_path = str(tmp_path / "report.md")
+        mod.write_report_md(
+            md_path,
+            downloaded_all=[], failed=[], skipped=[],
+            matching_result=matching,
+            date_range=("2026/05/01", "2026/05/02"),
+            iteration=1,
+            supplemental=False,
+            aggregation=agg,
+            out_of_range_items=[],
+            ignored_records=ignored_records,
+        )
+        return pathlib.Path(md_path).read_text(encoding="utf-8")
+
+    def test_usd_record_renders_dollar_sign(self, tmp_path):
+        records = [{
+            "sender_email": "invoice+statements@mail.anthropic.com",
+            "ocr": {"transactionAmount": 10.00, "currency": "USD"},
+        }]
+        md = self._invoke_md(tmp_path, records)
+        assert "$10.00" in md
+        assert "¥10.00" not in md
+
+    def test_cny_record_renders_yuan(self, tmp_path):
+        records = [{
+            "sender_email": "billing@termius.com",
+            "ocr": {"transactionAmount": 99.00, "currency": "CNY"},
+        }]
+        md = self._invoke_md(tmp_path, records)
+        assert "¥99.00" in md
+        assert "$99.00" not in md
+
+    def test_missing_currency_defaults_to_yuan(self, tmp_path):
+        records = [{
+            "sender_email": "x@example.com",
+            "ocr": {"transactionAmount": 50.00},  # no currency key
+        }]
+        md = self._invoke_md(tmp_path, records)
+        assert "¥50.00" in md
+
+
+class TestIgnoredSummaryHelper:
+    """Unit B.1: _ignored_summary aggregates IGNORED records.
+
+    Contract:
+      - Returns (totals_by_currency: dict[str, float], top_domain: str, top_count: int)
+      - Unconvertible amounts contribute 0.00 to their currency bucket
+      - Missing sender_email → '未知发件人' bucket
+      - Top domain = argmax of per-domain counts (dict insertion order on ties)
+    """
+
+    def test_single_sender_usd(self):
+        from postprocess import _ignored_summary
+        recs = [
+            {"sender_email": "invoice+statements@mail.anthropic.com",
+             "ocr": {"transactionAmount": 10.0, "currency": "USD"}},
+            {"sender_email": "invoice+statements@mail.anthropic.com",
+             "ocr": {"transactionAmount": 20.0, "currency": "USD"}},
+        ]
+        totals, top_domain, top_count = _ignored_summary(recs)
+        assert totals == {"USD": 30.0}
+        assert top_domain == "mail.anthropic.com"
+        assert top_count == 2
+
+    def test_mixed_currency(self):
+        from postprocess import _ignored_summary
+        recs = [
+            {"sender_email": "a@foo.com",
+             "ocr": {"transactionAmount": 10.0, "currency": "USD"}},
+            {"sender_email": "b@foo.com",
+             "ocr": {"transactionAmount": 5.0, "currency": "CNY"}},
+        ]
+        totals, _top, _n = _ignored_summary(recs)
+        assert totals == {"USD": 10.0, "CNY": 5.0}
+
+    def test_missing_sender_bucketed(self):
+        from postprocess import _ignored_summary
+        recs = [
+            {"sender_email": "",
+             "ocr": {"transactionAmount": 7.0, "currency": "CNY"}},
+        ]
+        _totals, top_domain, _n = _ignored_summary(recs)
+        assert top_domain == "未知发件人"
+
+    def test_unconvertible_amount_contributes_zero(self):
+        from postprocess import _ignored_summary
+        recs = [
+            {"sender_email": "x@y.com",
+             "ocr": {"transactionAmount": "N/A", "currency": "CNY"}},
+        ]
+        totals, _top, _n = _ignored_summary(recs)
+        # Bucket exists at 0.0 — preserves currency visibility in summary output
+        assert totals == {"CNY": 0.0}
+
+    def test_missing_currency_buckets_as_cny(self):
+        from postprocess import _ignored_summary
+        recs = [
+            {"sender_email": "x@y.com",
+             "ocr": {"transactionAmount": 3.0}},  # no currency
+        ]
+        totals, _top, _n = _ignored_summary(recs)
+        assert totals == {"CNY": 3.0}
+
+    def test_top_domain_picks_most_frequent(self):
+        from postprocess import _ignored_summary
+        recs = [
+            {"sender_email": "a@rare.com",
+             "ocr": {"transactionAmount": 1.0, "currency": "CNY"}},
+            {"sender_email": "a@common.com",
+             "ocr": {"transactionAmount": 1.0, "currency": "CNY"}},
+            {"sender_email": "b@common.com",
+             "ocr": {"transactionAmount": 1.0, "currency": "CNY"}},
+        ]
+        _totals, top_domain, top_count = _ignored_summary(recs)
+        assert top_domain == "common.com"
+        assert top_count == 2
