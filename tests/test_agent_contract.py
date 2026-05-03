@@ -1362,3 +1362,150 @@ class TestChatSentinelContract:
         assert source.count('"CHAT_ATTACHMENTS: "') <= 2, (
             "Unexpected duplication of CHAT_ATTACHMENTS prefix literal"
         )
+
+
+class TestRunSupplementalSilence:
+    """v5.8 Unit C: initial run deferring to supplemental emits no
+    user-facing output (no CHAT_MESSAGE_*, no CHAT_ATTACHMENTS), only a
+    stderr AGENT_HINT and exit 5. Supplemental runs still emit sentinels
+    regardless of status (prevents user silence on max-iterations)."""
+
+    @pytest.fixture
+    def cli_module(self):
+        import importlib.util, pathlib
+        root = pathlib.Path(__file__).parent.parent
+        spec = importlib.util.spec_from_file_location(
+            "dl_cli_silence",
+            root / "scripts" / "download-invoices.py",
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def _write_missing_json(self, output_dir, recommended_next_action):
+        import json, os, pathlib
+        pathlib.Path(output_dir).mkdir(parents=True, exist_ok=True)
+        payload = {
+            "schema_version": "1.0",
+            "iteration": 1,
+            "iteration_cap": 3,
+            "status": "needs_retry" if recommended_next_action == "run_supplemental" else "converged",
+            "recommended_next_action": recommended_next_action,
+            "convergence_hash": "0" * 16,
+            "items": [],
+            "out_of_range_items": [],
+        }
+        with open(os.path.join(output_dir, "missing.json"), "w") as f:
+            json.dump(payload, f)
+        return payload
+
+    def _install_pipeline_stubs(self, cli_module, monkeypatch, missing_payload, tmp_path):
+        """Stub every pipeline step so main() can run without network/creds."""
+        monkeypatch.setattr(
+            cli_module, "write_missing_json",
+            lambda path, **kw: missing_payload,
+        )
+        # GmailClient stubbed to a no-op class; stub search/get_full_message so
+        # Step 2/3 produce no work.
+        monkeypatch.setattr(cli_module, "GmailClient", lambda *a, **kw: _StubGmail())
+        # Pipeline helpers — some may or may not exist at these exact names.
+        # Use raising=False to tolerate missing attrs.
+        for name, retval in [
+            ("preflight_checks", 0),
+            ("_do_search_and_classify", []),
+            ("_do_download_round", ([], [], [])),
+            ("analyze_pdf_batch", {}),
+            ("rename_by_ocr", None),
+            ("merge_supplemental_downloads", []),
+        ]:
+            monkeypatch.setattr(
+                cli_module, name,
+                lambda *a, _r=retval, **kw: _r,
+                raising=False,
+            )
+        monkeypatch.setattr(
+            cli_module, "do_all_matching",
+            lambda recs: {
+                "hotel": {"matched": [], "unmatched_invoices": [],
+                          "unmatched_folios": []},
+                "ridehailing": {"matched": [], "unmatched_invoices": [],
+                                "unmatched_receipts": []},
+                "unparsed": [],
+                "dedup_removed": [],
+            },
+        )
+        monkeypatch.setattr(
+            cli_module, "build_aggregation",
+            lambda m, r: {"voucher_count": 0, "grand_total": 0.0,
+                           "rows": [], "subtotals": {},
+                           "unmatched": {"hotel_invoices": 0,
+                                          "hotel_folios": 0,
+                                          "rh_invoices": 0,
+                                          "rh_receipts": 0},
+                           "low_conf": {"count": 0, "amount": 0.0}},
+        )
+        monkeypatch.setattr(cli_module, "write_report_md", lambda *a, **kw: None)
+        monkeypatch.setattr(cli_module, "write_summary_csv", lambda *a, **kw: 0)
+        monkeypatch.setattr(cli_module, "zip_output", lambda *a, **kw: str(tmp_path / "z.zip"))
+
+    def test_initial_run_with_run_supplemental_emits_agent_hint_no_sentinels(
+        self, tmp_path, cli_module, monkeypatch, capsys,
+    ):
+        prebaked = self._write_missing_json(str(tmp_path), "run_supplemental")
+        self._install_pipeline_stubs(cli_module, monkeypatch, prebaked, tmp_path)
+
+        import sys as _sys
+        old_argv = _sys.argv[:]
+        _sys.argv = [
+            "download-invoices.py",
+            "--start", "2026/01/01", "--end", "2026/04/01",
+            "--output", str(tmp_path),
+            "--skip-preflight", "--no-llm",
+        ]
+        try:
+            with pytest.raises(SystemExit) as excinfo:
+                cli_module.main()
+        finally:
+            _sys.argv = old_argv
+
+        captured = capsys.readouterr()
+        assert excinfo.value.code == 5, f"expected exit 5, got {excinfo.value.code}"
+        assert "AGENT_HINT: run_supplemental" in captured.err
+        assert "CHAT_MESSAGE_START" not in captured.out
+        assert "CHAT_MESSAGE_END" not in captured.out
+        assert "CHAT_ATTACHMENTS:" not in captured.out
+
+    def test_supplemental_run_still_emits_sentinels(
+        self, tmp_path, cli_module, monkeypatch, capsys,
+    ):
+        """Supplemental run with run_supplemental status still emits sentinels
+        so user isn't left silent at max_iterations_reached."""
+        prebaked = self._write_missing_json(str(tmp_path), "run_supplemental")
+        self._install_pipeline_stubs(cli_module, monkeypatch, prebaked, tmp_path)
+
+        import sys as _sys
+        old_argv = _sys.argv[:]
+        _sys.argv = [
+            "download-invoices.py", "--supplemental",
+            "--start", "2026/01/01", "--end", "2026/04/01",
+            "--output", str(tmp_path),
+            "--skip-preflight", "--no-llm",
+        ]
+        try:
+            with pytest.raises(SystemExit):
+                cli_module.main()
+        finally:
+            _sys.argv = old_argv
+
+        captured = capsys.readouterr()
+        assert "CHAT_MESSAGE_START" in captured.out
+        assert "CHAT_MESSAGE_END" in captured.out
+        assert "AGENT_HINT: run_supplemental" not in captured.err
+
+
+class _StubGmail:
+    def __init__(self, *a, **kw): pass
+    def search(self, *a, **kw): return []
+    def list_messages(self, *a, **kw): return []
+    def get_message(self, *a, **kw): return {}
+    def get_full_message(self, *a, **kw): return {}

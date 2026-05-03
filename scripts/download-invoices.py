@@ -40,6 +40,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import ssl
 import subprocess
@@ -1580,6 +1581,24 @@ def main():
         say(f"⚠️  zip skipped: {e}")
 
     say(f"\n✅ PDFs:     {pdfs_dir}/ ({sum(1 for d in downloaded_all if d.get('valid'))} files)")
+
+    # --- v5.8 Unit C: silent run_supplemental deferral ---
+    # Initial run (not --supplemental) with recommended_next_action ==
+    # "run_supplemental" emits NO user-facing output. The Agent reads the
+    # AGENT_HINT from stderr, runs the supplemental command, and only THAT
+    # run's print_openclaw_summary delivers CHAT_MESSAGE_*/CHAT_ATTACHMENTS
+    # to the user. Prevents the user from receiving two zips (an incomplete
+    # one now + a complete one after supplemental) whose CSV/MD/zip contents
+    # differ.
+    if (not args.supplemental
+            and missing_payload["recommended_next_action"] == "run_supplemental"):
+        sys.stderr.write(
+            f"AGENT_HINT: run_supplemental "
+            f"--start {args.start} --end {args.end} "
+            f"--output {shlex.quote(os.path.abspath(args.output))}\n"
+        )
+        log.close()
+        sys.exit(EXIT_PARTIAL)
 
     # --- Step 11: OpenClaw chat summary (stdout + run.log). MUST be called
     #     before log.close() — writer=say dual-writes to the still-open log.
