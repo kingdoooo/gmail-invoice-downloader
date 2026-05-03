@@ -1196,7 +1196,7 @@ def print_openclaw_summary(
     missing_status: str,
     date_range: Tuple[str, str],
     writer: Callable[[str], None] = print,
-    ignored_count: int = 0,  # v5.7 Unit 4
+    ignored_records=None,  # v5.8 Unit B (replaces ignored_count)
 ) -> None:
     """Render a ≤20-line summary to stdout (and optionally run.log via writer).
 
@@ -1209,6 +1209,10 @@ def print_openclaw_summary(
 
     Raises ValueError if ``missing_status`` is not one of
     ``_MISSING_STATUSES`` (DEC-7: fail-fast on unknown enum).
+
+    ``ignored_records`` is the list of records that got IGNORED_ prefix
+    filenames. When non-empty, emits a 2-line 📭 block: totals-by-currency
+    + top sender + reply-to-add-exclusion CTA. None or [] emits nothing.
     """
     if missing_status not in _MISSING_STATUSES:
         raise ValueError(
@@ -1298,12 +1302,29 @@ def print_openclaw_summary(
         )
     else:  # ask_user
         writer(f"👉 下一步：需人工核查 — 见 {abs_md} 末尾「⚠️ 需人工核查」区")
-    # 9.5. v5.7 Unit 4: IGNORED count line (only if any were filtered)
-    if ignored_count:
-        writer(
-            f"📭 已忽略 {ignored_count} 张非报销票据"
-            f"（详见下载报告.md §已忽略的非报销票据）"
+    # 9.5. v5.8 Unit B: IGNORED summary — totals-by-currency + top sender + CTA.
+    # If all records lack a parseable sender domain, suppress the CTA (a reply
+    # of "加 未知发件人" would be useless) and collapse to one line.
+    if ignored_records:
+        totals, top_domain, _top_count = _ignored_summary(ignored_records)
+        total_str = " / ".join(
+            f"{currency_symbol(cur)}{amt:.2f}"
+            for cur, amt in sorted(totals.items())
         )
+        if top_domain != "未知发件人":
+            writer(
+                f"📭 已忽略 {len(ignored_records)} 张非报销票据"
+                f"（{total_str}，主要来自 {top_domain}）"
+            )
+            writer(
+                f'   加过滤规则？回复 "加 {top_domain}" '
+                f"我帮你写进 learned_exclusions.json"
+            )
+        else:
+            writer(
+                f"📭 已忽略 {len(ignored_records)} 张非报销票据"
+                f"（{total_str}）"
+            )
     # 10. Blank
     writer("")
     # 11. Deliverables

@@ -1139,7 +1139,7 @@ def _run_postprocess_only(
         missing_status=missing_payload["recommended_next_action"],
         date_range=(run_start_date or "?", run_end_date or "?"),
         writer=say,
-        ignored_count=len(ignored_records),
+        ignored_records=ignored_records,
     )
 
     # --- Exit semantics ---
@@ -1594,7 +1594,7 @@ def main():
         missing_status=missing_payload["recommended_next_action"],
         date_range=(args.start, args.end),
         writer=say,
-        ignored_count=len(ignored_records),
+        ignored_records=ignored_records,
     )
 
     # --- Exit code ---

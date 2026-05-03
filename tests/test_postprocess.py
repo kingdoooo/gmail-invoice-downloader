@@ -3243,11 +3243,11 @@ class TestPrintOpenClawSummary:
             f"but lines after it: {lines[end_idx+1:]}"
         )
 
-    # -- Unit 4 R3: ignored_count line (v5.7) -----------------------------
+    # -- Unit 4 R3: ignored_records line (v5.7 → rewritten for v5.8) ------
 
     def test_ignored_count_line_rendered_when_nonzero(self):
-        """Unit 4 R3: print_openclaw_summary emits '📭 已忽略 N 张非报销票据'
-        when ignored_count > 0.
+        """Unit 4 R3 (v5.8 rewrite): print_openclaw_summary emits
+        '📭 已忽略 N 张非报销票据' when ignored_records is non-empty.
         """
         from postprocess import print_openclaw_summary
         aggregation = {
@@ -3260,6 +3260,14 @@ class TestPrintOpenClawSummary:
             "grand_total": 100.0,
         }
         lines = []
+        ignored = [
+            {"sender_email": "noreply@saas.example.com",
+             "ocr": {"transactionAmount": 10.0, "currency": "USD"}},
+            {"sender_email": "noreply@saas.example.com",
+             "ocr": {"transactionAmount": 20.0, "currency": "USD"}},
+            {"sender_email": "noreply@saas.example.com",
+             "ocr": {"transactionAmount": 30.0, "currency": "USD"}},
+        ]
         print_openclaw_summary(
             aggregation,
             output_dir="/tmp/out",
@@ -3270,7 +3278,7 @@ class TestPrintOpenClawSummary:
             missing_status="stop",
             date_range=("2025/01/01", "2025/03/31"),
             writer=lines.append,
-            ignored_count=3,
+            ignored_records=ignored,
         )
         text = "\n".join(lines)
         assert "📭 已忽略 3 张非报销票据" in text
@@ -3297,10 +3305,98 @@ class TestPrintOpenClawSummary:
             missing_status="stop",
             date_range=("2025/01/01", "2025/03/31"),
             writer=lines.append,
-            ignored_count=0,
+            ignored_records=[],
         )
         text = "\n".join(lines)
         assert "已忽略" not in text
+
+    # -- v5.8 Unit B: IGNORED summary line (totals + top sender + CTA) ----
+
+    def _ignored_usd_records(self):
+        return [
+            {"sender_email": "invoice+statements@mail.anthropic.com",
+             "ocr": {"transactionAmount": 10.0, "currency": "USD"}},
+            {"sender_email": "invoice+statements@mail.anthropic.com",
+             "ocr": {"transactionAmount": 20.0, "currency": "USD"}},
+        ]
+
+    def test_ignored_line_shows_total_and_top_sender(self, tmp_path):
+        agg = self._populated_agg()
+        lines = self._capture(
+            aggregation=agg, **self._default_paths(tmp_path),
+            missing_status="stop", date_range=("2026/04/01", "2026/04/30"),
+            ignored_records=self._ignored_usd_records(),
+        )
+        text = "\n".join(lines)
+        assert "📭 已忽略 2 张非报销票据" in text
+        assert "$30.00" in text
+        assert "主要来自 mail.anthropic.com" in text
+
+    def test_ignored_line_shows_cta_with_domain(self, tmp_path):
+        agg = self._populated_agg()
+        lines = self._capture(
+            aggregation=agg, **self._default_paths(tmp_path),
+            missing_status="stop", date_range=("2026/04/01", "2026/04/30"),
+            ignored_records=self._ignored_usd_records(),
+        )
+        text = "\n".join(lines)
+        assert '加 mail.anthropic.com' in text
+        assert "learned_exclusions.json" in text
+
+    def test_ignored_line_mixed_currency_sorted(self, tmp_path):
+        agg = self._populated_agg()
+        recs = [
+            {"sender_email": "a@foo.com",
+             "ocr": {"transactionAmount": 5.0, "currency": "CNY"}},
+            {"sender_email": "a@foo.com",
+             "ocr": {"transactionAmount": 10.0, "currency": "USD"}},
+        ]
+        lines = self._capture(
+            aggregation=agg, **self._default_paths(tmp_path),
+            missing_status="stop", date_range=("2026/04/01", "2026/04/30"),
+            ignored_records=recs,
+        )
+        text = "\n".join(lines)
+        # Sorted alphabetically by currency code: CNY < USD
+        assert "¥5.00 / $10.00" in text
+
+    def test_ignored_line_absent_when_empty(self, tmp_path):
+        agg = self._populated_agg()
+        lines = self._capture(
+            aggregation=agg, **self._default_paths(tmp_path),
+            missing_status="stop", date_range=("2026/04/01", "2026/04/30"),
+            ignored_records=[],
+        )
+        text = "\n".join(lines)
+        assert "📭" not in text
+
+    def test_ignored_line_absent_when_none(self, tmp_path):
+        agg = self._populated_agg()
+        lines = self._capture(
+            aggregation=agg, **self._default_paths(tmp_path),
+            missing_status="stop", date_range=("2026/04/01", "2026/04/30"),
+            # No ignored_records kwarg at all → defaults to None
+        )
+        text = "\n".join(lines)
+        assert "📭" not in text
+
+    def test_ignored_line_unknown_sender_suppresses_cta(self, tmp_path):
+        agg = self._populated_agg()
+        recs = [
+            {"sender_email": "",
+             "ocr": {"transactionAmount": 1.0, "currency": "CNY"}},
+        ]
+        lines = self._capture(
+            aggregation=agg, **self._default_paths(tmp_path),
+            missing_status="stop", date_range=("2026/04/01", "2026/04/30"),
+            ignored_records=recs,
+        )
+        text = "\n".join(lines)
+        # First line still present (count + total), but no CTA reply hint
+        assert "📭 已忽略 1 张非报销票据" in text
+        assert "¥1.00" in text
+        assert "加 未知发件人" not in text
+        assert "主要来自" not in text
 
 
 class TestPromptContract:
