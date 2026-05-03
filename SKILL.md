@@ -547,7 +547,7 @@ switch status:
 | 2 | Gmail auth 失败 | `run scripts/gmail-auth.py` |
 | 3 | LLM config 失败 | 查 stderr REMEDIATION：针对当前 provider 调 AWS/Anthropic/OpenAI 凭证，或切 `--llm-provider=none` |
 | 4 | Gmail 配额超限 | 等 60 秒 + `--max-results` 降低 |
-| 5 | 部分成功 / 补搜延迟 | 两种子语义：(a) 正常出交付物但有 UNPARSED / failed 项 → 查 missing.json 按常规流程；(b) **stderr 含 `AGENT_HINT: run_supplemental ...` + `REMEDIATION: ...`** → stdout 为空（无 CHAT_MESSAGE_START/END、无 CHAT_ATTACHMENTS）；**不要**向用户转发任何东西，直接按 `AGENT_HINT:` 指令跑补搜（v5.8 Unit C） |
+| 5 | 部分成功 / 补搜延迟 | 两种子语义：(a) 正常出交付物但有 UNPARSED / failed 项 → 查 missing.json 按常规流程；(b) **stderr 含 `AGENT_HINT: run_supplemental ...` + `REMEDIATION: ...`** → stdout 为空（无 CHAT_MESSAGE_START/END、无 CHAT_ATTACHMENTS）；**不要**向用户转发任何东西，直接按 `AGENT_HINT:` 指令跑补搜。 如果 UNPARSED/failed 与 run_supplemental 同时发生，子语义 (b) 优先 —— 初运行仍然静默，UNPARSED 等项将在 supplemental 补搜的摘要里重新呈现。 (v5.8 Unit C) |
 
 Agent pattern-match stderr `REMEDIATION:` 行自动恢复。
 
@@ -597,6 +597,7 @@ After each Skill run:
    skip all subsequent steps. Do not send anything to the user.
    Execute the command in the `AGENT_HINT:` line instead, then apply this
    playbook to that supplemental run's output.
+   You MAY send a brief 一行占位消息 (e.g., `正在补搜...`) to the user before running the supplemental command to avoid long silences, but MUST NOT forward any Skill output, attachments, or stdout content from this run.
 
 1. Scan stdout for `CHAT_MESSAGE_START` and `CHAT_MESSAGE_END` lines.
 2. Forward the content **between** those two lines to the user **verbatim** — do not add, remove, translate, summarize, or cherry-pick. Preserve all emoji, Chinese text, blank lines, and the tail invite.
@@ -638,12 +639,14 @@ When the Skill summary contains a line like:
 
 and the user replies with `加 <domain>`:
 
-1. Open `<output_dir>/../learned_exclusions.json` (the same file the Skill reads at start; typically at repo root or next to the output dir).
-2. Append a new entry to the `senders: []` array:
+1. **Gate check:** only honor this reply when the Skill's most recent forwarded summary contained the `加 <domain>` CTA line. If the user sends `加 <domain>` without prior prompt, ask for clarification instead of writing.
+2. Open `<skill_dir>/learned_exclusions.json` where `<skill_dir>` is the directory containing `SKILL.md` (the Skill's repo root — same file the Skill reads at start via `SKILL_DIR`).
+3. Append a new entry to the `exclusions: []` array:
    ```json
-   {"domain": "<domain>", "reason": "user approved", "added_at": "<ISO-8601 UTC>"}
+   {"rule": "-from:<domain>", "reason": "user approved", "confirmed": "<YYYY-MM-DD>"}
    ```
-3. Confirm to the user: `已加 <domain>，下次跑该时间窗会自动过滤`.
+   Note: `rule` MUST carry the Gmail operator prefix `-from:` (or `-subject:` if the user asked to filter by subject). `confirmed` is a plain ISO date (YYYY-MM-DD), not a full timestamp.
+4. Confirm to the user: `已加 <domain>（写入 learned_exclusions.json），下次跑该时间窗会自动过滤`.
 
 The Skill itself does NOT mutate `learned_exclusions.json`; this is intentional (keeps the Skill deterministic and replayable).
 
