@@ -3923,3 +3923,42 @@ class TestCurrencyDefensiveFill:
             b"%PDF-usd", use_cache=False, cache_dir=tmp_path,
         )
         assert result.get("currency") == "USD"
+
+
+class TestCurrencySymbolTable:
+    """Unit A: currency_symbol maps ISO-4217 codes to display symbols.
+
+    Contract:
+      - Known codes → short symbol (¥/$/€/£ etc.)
+      - Unknown codes → "{CODE} " (uppercase + trailing space)
+      - None / empty → ¥ (CNY fallback)
+      - Case-insensitive input
+    """
+
+    def test_known_codes(self):
+        from postprocess import currency_symbol
+        assert currency_symbol("CNY") == "¥"
+        assert currency_symbol("USD") == "$"
+        assert currency_symbol("EUR") == "€"
+        assert currency_symbol("GBP") == "£"
+        assert currency_symbol("JPY") == "¥"
+        assert currency_symbol("HKD") == "HK$"
+
+    def test_unknown_code_preserves_as_prefix(self):
+        from postprocess import currency_symbol
+        # Hallucinated / malformed code: fallback to uppercase + space
+        assert currency_symbol("RMB") == "RMB "
+        assert currency_symbol("XYZ") == "XYZ "
+
+    def test_none_is_cny(self):
+        from postprocess import currency_symbol
+        assert currency_symbol(None) == "¥"
+
+    def test_empty_string_is_cny(self):
+        from postprocess import currency_symbol
+        assert currency_symbol("") == "¥"
+
+    def test_lowercase_input(self):
+        from postprocess import currency_symbol
+        assert currency_symbol("usd") == "$"
+        assert currency_symbol("cny") == "¥"

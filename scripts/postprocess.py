@@ -56,6 +56,36 @@ from core.validation import _parse_ocr_date, validate_ocr_plausibility
 
 
 # =============================================================================
+# Currency symbols (v5.8 Unit A.3)
+# =============================================================================
+# Maps ISO-4217 three-letter codes to display prefixes used in §IGNORED MD
+# and the OpenClaw chat summary's IGNORED line. Unknown codes fall back to
+# "{CODE} " so weird LLM output never silently becomes ¥.
+
+_CURRENCY_SYMBOLS = {
+    "CNY": "¥",
+    "USD": "$",
+    "EUR": "€",
+    "GBP": "£",
+    "JPY": "¥",
+    "HKD": "HK$",
+}
+
+
+def currency_symbol(code) -> str:
+    """Return the display prefix for an ISO-4217 code.
+
+    None / empty / lowercase are all normalized. Unknown codes return
+    `"{UPPER} "` (trailing space preserved so the caller can concatenate
+    directly with the amount).
+    """
+    key = (code or "CNY").upper()
+    if key in _CURRENCY_SYMBOLS:
+        return _CURRENCY_SYMBOLS[key]
+    return key + " "
+
+
+# =============================================================================
 # Category labels for filenames / CSV
 # =============================================================================
 
