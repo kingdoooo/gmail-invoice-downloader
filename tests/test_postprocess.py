@@ -3962,3 +3962,66 @@ class TestCurrencySymbolTable:
         from postprocess import currency_symbol
         assert currency_symbol("usd") == "$"
         assert currency_symbol("cny") == "¥"
+
+
+class TestIgnoredMdRenderingCurrency:
+    """Unit A.4: §IGNORED MD renders the correct currency symbol per record."""
+
+    @staticmethod
+    def _invoke_md(tmp_path, ignored_records):
+        """Invoke write_report_md with minimal aggregation so we can read back
+        the §IGNORED section without touching the matching pipeline."""
+        # write_report_md is in scripts/download-invoices.py (hyphenated). Import
+        # via importlib to sidestep the filename hyphen.
+        import importlib.util, sys, pathlib
+        root = pathlib.Path(__file__).parent.parent
+        spec = importlib.util.spec_from_file_location(
+            "dl_cli",
+            root / "scripts" / "download-invoices.py",
+        )
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["dl_cli"] = mod
+        spec.loader.exec_module(mod)
+
+        from postprocess import do_all_matching, build_aggregation
+        matching = do_all_matching([])
+        agg = build_aggregation(matching, [])
+        md_path = str(tmp_path / "report.md")
+        mod.write_report_md(
+            md_path,
+            downloaded_all=[], failed=[], skipped=[],
+            matching_result=matching,
+            date_range=("2026/05/01", "2026/05/02"),
+            iteration=1,
+            supplemental=False,
+            aggregation=agg,
+            out_of_range_items=[],
+            ignored_records=ignored_records,
+        )
+        return pathlib.Path(md_path).read_text(encoding="utf-8")
+
+    def test_usd_record_renders_dollar_sign(self, tmp_path):
+        records = [{
+            "sender_email": "invoice+statements@mail.anthropic.com",
+            "ocr": {"transactionAmount": 10.00, "currency": "USD"},
+        }]
+        md = self._invoke_md(tmp_path, records)
+        assert "$10.00" in md
+        assert "¥10.00" not in md
+
+    def test_cny_record_renders_yuan(self, tmp_path):
+        records = [{
+            "sender_email": "billing@termius.com",
+            "ocr": {"transactionAmount": 99.00, "currency": "CNY"},
+        }]
+        md = self._invoke_md(tmp_path, records)
+        assert "¥99.00" in md
+        assert "$99.00" not in md
+
+    def test_missing_currency_defaults_to_yuan(self, tmp_path):
+        records = [{
+            "sender_email": "x@example.com",
+            "ocr": {"transactionAmount": 50.00},  # no currency key
+        }]
+        md = self._invoke_md(tmp_path, records)
+        assert "¥50.00" in md

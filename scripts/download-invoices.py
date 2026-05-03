@@ -71,6 +71,7 @@ from invoice_helpers import (  # noqa: E402
 from postprocess import (  # noqa: E402
     analyze_pdf_batch,
     build_aggregation,
+    currency_symbol,
     rename_by_ocr,
     do_all_matching,
     print_openclaw_summary,
@@ -751,11 +752,9 @@ def write_report_md(
                 amount = float(raw_amount) if raw_amount not in (None, "") else None
             except (TypeError, ValueError):
                 amount = None
-            currency = ocr.get("currency") or ""
             if amount is not None:
-                prefix = "¥" if not currency or currency == "CNY" else ""
-                suffix = f" {currency}" if currency and currency != "CNY" else ""
-                lines.append(f"- {label}：{prefix}{amount:.2f}{suffix}")
+                sym = currency_symbol(ocr.get("currency"))
+                lines.append(f"- {label}：{sym}{amount:.2f}")
             else:
                 lines.append(f"- {label}：金额未识别")
         lines.append("")
