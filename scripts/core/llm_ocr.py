@@ -215,6 +215,11 @@ def extract_from_bytes(
     if use_cache:
         cached = _cache_read(pdf_bytes, cache_dir)
         if cached is not None:
+            # v5.8 Unit A.2: pre-v5.8 caches lack `currency`; fill defensively
+            # so downstream renderers (MD §IGNORED, summary line) can trust
+            # the field exists.
+            if not cached.get("currency"):
+                cached["currency"] = "CNY"
             return cached
 
     client = llm_client or get_client()
@@ -226,6 +231,10 @@ def extract_from_bytes(
 
     data = parse_llm_response(response_text)
     data = validate_and_fix_vendor_info(data)
+
+    # v5.8 Unit A.2: LLM may omit currency despite prompt; guarantee presence.
+    if not data.get("currency"):
+        data["currency"] = "CNY"
 
     if use_cache:
         _cache_write(pdf_bytes, data, cache_dir)

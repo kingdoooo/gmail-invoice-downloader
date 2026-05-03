@@ -3852,3 +3852,74 @@ class TestCurrencyPromptContract:
         # 3 段 example JSON 至少各有一处 "currency": "CNY"
         assert prompt.count('"currency": "CNY"') >= 3, \
             "电子发票 / 酒店水单 / 网约车 3 段 example 都要列 currency=CNY"
+
+
+class TestCurrencyDefensiveFill:
+    """Unit A: extract_from_bytes guarantees currency field presence."""
+
+    def test_missing_currency_defaults_to_cny(self, tmp_path, monkeypatch):
+        from core import llm_ocr
+
+        # Stub extract_with_retry to return LLM output without `currency`.
+        monkeypatch.setattr(
+            llm_ocr, "extract_with_retry",
+            lambda pdf, prompt, client: '{"transactionAmount": 100.0, "vendorName": "T"}',
+        )
+        # Stub get_client to bypass provider init.
+        class _FakeClient:
+            provider_name = "anthropic"
+        monkeypatch.setattr(llm_ocr, "get_client", lambda: _FakeClient())
+
+        result = llm_ocr.extract_from_bytes(
+            b"%PDF-fake", use_cache=False, cache_dir=tmp_path,
+        )
+        assert result.get("currency") == "CNY"
+
+    def test_empty_currency_is_normalized_to_cny(self, tmp_path, monkeypatch):
+        from core import llm_ocr
+        monkeypatch.setattr(
+            llm_ocr, "extract_with_retry",
+            lambda pdf, prompt, client: '{"transactionAmount": 1, "currency": ""}',
+        )
+        class _FakeClient:
+            provider_name = "anthropic"
+        monkeypatch.setattr(llm_ocr, "get_client", lambda: _FakeClient())
+
+        result = llm_ocr.extract_from_bytes(
+            b"%PDF-fake2", use_cache=False, cache_dir=tmp_path,
+        )
+        assert result.get("currency") == "CNY"
+
+    def test_old_cache_without_currency_gets_filled(self, tmp_path):
+        from core import llm_ocr
+        import json, hashlib
+
+        pdf_bytes = b"%PDF-old-cache"
+        # Seed a cache entry that predates v5.8 (no `currency` field).
+        tmp_path.mkdir(exist_ok=True)
+        digest = hashlib.sha256(pdf_bytes).hexdigest()[:16]
+        cache_file = tmp_path / f"{digest}.json"
+        cache_file.write_text(json.dumps({
+            "ocr": {"transactionAmount": 50.0, "vendorName": "legacy"},
+            "schema_version": "1.0",
+        }), encoding="utf-8")
+
+        result = llm_ocr.extract_from_bytes(
+            pdf_bytes, use_cache=True, cache_dir=tmp_path,
+        )
+        assert result.get("currency") == "CNY"
+
+    def test_explicit_usd_is_preserved(self, tmp_path, monkeypatch):
+        from core import llm_ocr
+        monkeypatch.setattr(
+            llm_ocr, "extract_with_retry",
+            lambda pdf, prompt, client: '{"transactionAmount": 10, "currency": "USD"}',
+        )
+        class _FakeClient:
+            provider_name = "anthropic"
+        monkeypatch.setattr(llm_ocr, "get_client", lambda: _FakeClient())
+
+        result = llm_ocr.extract_from_bytes(
+            b"%PDF-usd", use_cache=False, cache_dir=tmp_path,
+        )
+        assert result.get("currency") == "USD"
