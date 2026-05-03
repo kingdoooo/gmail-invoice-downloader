@@ -4025,3 +4025,80 @@ class TestIgnoredMdRenderingCurrency:
         }]
         md = self._invoke_md(tmp_path, records)
         assert "¥50.00" in md
+
+
+class TestIgnoredSummaryHelper:
+    """Unit B.1: _ignored_summary aggregates IGNORED records.
+
+    Contract:
+      - Returns (totals_by_currency: dict[str, float], top_domain: str, top_count: int)
+      - Unconvertible amounts contribute 0.00 to their currency bucket
+      - Missing sender_email → '未知发件人' bucket
+      - Top domain = argmax of per-domain counts (dict insertion order on ties)
+    """
+
+    def test_single_sender_usd(self):
+        from postprocess import _ignored_summary
+        recs = [
+            {"sender_email": "invoice+statements@mail.anthropic.com",
+             "ocr": {"transactionAmount": 10.0, "currency": "USD"}},
+            {"sender_email": "invoice+statements@mail.anthropic.com",
+             "ocr": {"transactionAmount": 20.0, "currency": "USD"}},
+        ]
+        totals, top_domain, top_count = _ignored_summary(recs)
+        assert totals == {"USD": 30.0}
+        assert top_domain == "mail.anthropic.com"
+        assert top_count == 2
+
+    def test_mixed_currency(self):
+        from postprocess import _ignored_summary
+        recs = [
+            {"sender_email": "a@foo.com",
+             "ocr": {"transactionAmount": 10.0, "currency": "USD"}},
+            {"sender_email": "b@foo.com",
+             "ocr": {"transactionAmount": 5.0, "currency": "CNY"}},
+        ]
+        totals, _top, _n = _ignored_summary(recs)
+        assert totals == {"USD": 10.0, "CNY": 5.0}
+
+    def test_missing_sender_bucketed(self):
+        from postprocess import _ignored_summary
+        recs = [
+            {"sender_email": "",
+             "ocr": {"transactionAmount": 7.0, "currency": "CNY"}},
+        ]
+        _totals, top_domain, _n = _ignored_summary(recs)
+        assert top_domain == "未知发件人"
+
+    def test_unconvertible_amount_contributes_zero(self):
+        from postprocess import _ignored_summary
+        recs = [
+            {"sender_email": "x@y.com",
+             "ocr": {"transactionAmount": "N/A", "currency": "CNY"}},
+        ]
+        totals, _top, _n = _ignored_summary(recs)
+        # Bucket exists at 0.0 — preserves currency visibility in summary output
+        assert totals == {"CNY": 0.0}
+
+    def test_missing_currency_buckets_as_cny(self):
+        from postprocess import _ignored_summary
+        recs = [
+            {"sender_email": "x@y.com",
+             "ocr": {"transactionAmount": 3.0}},  # no currency
+        ]
+        totals, _top, _n = _ignored_summary(recs)
+        assert totals == {"CNY": 3.0}
+
+    def test_top_domain_picks_most_frequent(self):
+        from postprocess import _ignored_summary
+        recs = [
+            {"sender_email": "a@rare.com",
+             "ocr": {"transactionAmount": 1.0, "currency": "CNY"}},
+            {"sender_email": "a@common.com",
+             "ocr": {"transactionAmount": 1.0, "currency": "CNY"}},
+            {"sender_email": "b@common.com",
+             "ocr": {"transactionAmount": 1.0, "currency": "CNY"}},
+        ]
+        _totals, top_domain, top_count = _ignored_summary(recs)
+        assert top_domain == "common.com"
+        assert top_count == 2

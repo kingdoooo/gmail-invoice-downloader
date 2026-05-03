@@ -85,6 +85,48 @@ def currency_symbol(code) -> str:
     return key + " "
 
 
+def _ignored_summary(records):
+    """Aggregate IGNORED records for the summary line.
+
+    Returns:
+        (totals_by_currency, top_domain, top_count)
+        where totals_by_currency is dict[str, float], keyed by ISO-4217
+        code (defaults to "CNY" if missing); unconvertible amounts contribute
+        0.0 but still create the currency bucket so the symbol remains visible
+        in the rendered line.
+
+        top_domain is the most common sender email domain across records
+        ('未知发件人' for entries without a valid from: header). Ties break
+        by dict insertion order (first seen wins) — intentional YAGNI.
+
+    This helper is pure (no I/O, no printing). The summary renderer
+    (print_openclaw_summary) formats the tuple into display strings.
+    """
+    totals = {}
+    domain_counts = {}
+    for rec in records:
+        ocr = rec.get("ocr") or {}
+        raw_amt = ocr.get("transactionAmount")
+        try:
+            amt = float(raw_amt) if raw_amt not in (None, "") else 0.0
+        except (TypeError, ValueError):
+            amt = 0.0
+        cur = (ocr.get("currency") or "CNY").upper()
+        totals[cur] = totals.get(cur, 0.0) + amt
+
+        sender = rec.get("sender_email") or ""
+        if "@" in sender:
+            domain = sender.split("@", 1)[-1]
+        else:
+            domain = "未知发件人"
+        domain_counts[domain] = domain_counts.get(domain, 0) + 1
+
+    top_domain, top_count = max(
+        domain_counts.items(), key=lambda kv: kv[1],
+    )
+    return totals, top_domain, top_count
+
+
 # =============================================================================
 # Category labels for filenames / CSV
 # =============================================================================
