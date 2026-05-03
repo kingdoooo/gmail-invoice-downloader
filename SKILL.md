@@ -7,7 +7,7 @@ icon: "🧾"
 
 > **Skill target**: This Skill is invoked by **OpenClaw Agents**, not by end users directly. The non-standard frontmatter keys (`display_name`, `icon`) are OpenClaw runtime extensions — they are **not** part of the Anthropic Skill spec and do nothing in a plain Claude Code / Claude.ai context. The agent-facing contract — exit codes, `REMEDIATION:` stderr lines, `missing.json` schema v1.0 — is documented in § Exit Codes and § Loop Playbook below.
 
-# Gmail Invoice Downloader (v5.7.2)
+# Gmail Invoice Downloader (v5.8)
 
 搜索 Gmail 中用户指定日期范围内的发票/收据/水单/行程单，用 LLM OCR 提取销售方/日期/金额，按 P1 remark / P2 日期+金额 / P3 同日兜底 三层规则配对酒店水单↔住宿发票、按金额 0.01 容差配对网约车发票↔行程单，输出 `下载报告.md` + `发票汇总.csv` + `发票打包_YYYYMMDD-HHMMSS.zip`。
 
@@ -534,6 +534,8 @@ switch status:
 - **convergence_hash** — 连续两轮 items 不变 → 脚本自动输出 `status=converged`
 - **Agent 不重试 extraction_failed 项** — 这些需要人工核查 PDF
 
+**v5.8 note:** The initial run never delivers intermediate results to the user. If missing.json says `recommended_next_action: run_supplemental`, the Skill emits only `AGENT_HINT:` + `REMEDIATION:` on stderr and exits 5 — no chat message, no attachments. Agents should forward a brief "正在补搜..." placeholder to the user before executing the supplemental command to avoid long silences. Only the supplemental run's `CHAT_MESSAGE_START/END` + `CHAT_ATTACHMENTS:` block reaches the user.
+
 ---
 
 ## Exit Codes
@@ -545,7 +547,7 @@ switch status:
 | 2 | Gmail auth 失败 | `run scripts/gmail-auth.py` |
 | 3 | LLM config 失败 | 查 stderr REMEDIATION：针对当前 provider 调 AWS/Anthropic/OpenAI 凭证，或切 `--llm-provider=none` |
 | 4 | Gmail 配额超限 | 等 60 秒 + `--max-results` 降低 |
-| 5 | 部分成功 | 正常出交付物，但有 UNPARSED 或 failed 项 → 查 missing.json → 先跑 auto-probe（见 Loop Playbook 子节）再决定 run_supplemental |
+| 5 | 部分成功 / 补搜延迟 | 两种子语义：(a) 正常出交付物但有 UNPARSED / failed 项 → 查 missing.json 按常规流程；(b) **stderr 含 `AGENT_HINT: run_supplemental ...` + `REMEDIATION: ...`** → stdout 为空（无 CHAT_MESSAGE_START/END、无 CHAT_ATTACHMENTS）；**不要**向用户转发任何东西，直接按 `AGENT_HINT:` 指令跑补搜（v5.8 Unit C） |
 
 Agent pattern-match stderr `REMEDIATION:` 行自动恢复。
 
@@ -590,6 +592,12 @@ When `zip_output` fails (DEC-6), the zip entry is omitted but MD + CSV are still
 
 After each Skill run:
 
+0. **Check for silent-deferral first (v5.8):** If stdout does NOT contain
+   `CHAT_MESSAGE_START` (for example, exit=5 with stderr `AGENT_HINT: run_supplemental ...`),
+   skip all subsequent steps. Do not send anything to the user.
+   Execute the command in the `AGENT_HINT:` line instead, then apply this
+   playbook to that supplemental run's output.
+
 1. Scan stdout for `CHAT_MESSAGE_START` and `CHAT_MESSAGE_END` lines.
 2. Forward the content **between** those two lines to the user **verbatim** — do not add, remove, translate, summarize, or cherry-pick. Preserve all emoji, Chinese text, blank lines, and the tail invite.
 3. If the stdout also contains `CHAT_ATTACHMENTS: {...}`, parse the JSON and, **in order**, upload each `file.path` as an attachment to the current chat using the channel's native message tool. Use `file.caption` as the attachment label/caption.
@@ -609,10 +617,35 @@ After each Skill run:
 
 ### Invariants
 
-- Each sentinel appears at most **once** per Skill run.
+- Each sentinel appears **at most once** per Skill run. **May also appear zero times** — on early-error paths (exit 2/3/4) and on the v5.8 `run_supplemental` deferral path (exit 5 + stderr `AGENT_HINT:` + `REMEDIATION:`). Agents MUST check for sentinel presence before forwarding; absence is a valid state.
 - Strict ordering: `CHAT_MESSAGE_START` → `CHAT_MESSAGE_END` → `CHAT_ATTACHMENTS:` (the last two may be absent).
 - `CHAT_ATTACHMENTS:` present ⇒ `CHAT_MESSAGE_START` / `END` both present.
 - Regression-tested in `tests/test_agent_contract.py::TestChatSentinelContract` (R18).
+
+---
+
+## User Reply Conventions
+
+Some Skill messages invite the user to reply with a short command. The Agent, not the Skill, is responsible for acting on these replies.
+
+### "加 `<domain>`" — register an exclusion rule
+
+When the Skill summary contains a line like:
+
+```
+   加过滤规则？回复 "加 <domain>" 我帮你写进 learned_exclusions.json
+```
+
+and the user replies with `加 <domain>`:
+
+1. Open `<output_dir>/../learned_exclusions.json` (the same file the Skill reads at start; typically at repo root or next to the output dir).
+2. Append a new entry to the `senders: []` array:
+   ```json
+   {"domain": "<domain>", "reason": "user approved", "added_at": "<ISO-8601 UTC>"}
+   ```
+3. Confirm to the user: `已加 <domain>，下次跑该时间窗会自动过滤`.
+
+The Skill itself does NOT mutate `learned_exclusions.json`; this is intentional (keeps the Skill deterministic and replayable).
 
 ---
 
@@ -699,6 +732,32 @@ python3 scripts/probe-platform.py "https://新平台.com/xxx"
 
 **检测漂移**：`diff -r scripts/core/ ~/reimbursement-helper/backend/agent/utils/`
 **手动同步**：把变更逐文件 cherry-pick 过来（注意 `classify.py` 已删了 `detect_meal_type` 的随机逻辑，不要覆盖这个删除）。
+
+### 🟢 v5.8 — currency-aware IGNORED summary + silent run_supplemental
+
+**动机**：2025Q1 批次复盘发现三个独立但互相牵扯的问题：(a) `下载报告.md` §已忽略 把 USD Anthropic 账单显示成 `¥10.00` —— OCR prompt 从未定义 `currency`，MD 渲染代码读一个 LLM 不产出的字段，fallback 永远 `¥`。(b) 摘要里 `📭 已忽略 N 张...（详见 MD）` 信息密度太低，用户不翻 MD → add-exclusion 闭环断。(c) `status=needs_retry` 时 Skill 先发一套完整摘要 + 中间 zip 给用户，Agent 再跑补搜后又发一套最终的 —— 用户收到 2 份作废交付物（CSV/MD/zip 均会变）。
+
+- **feat(prompts):** `scripts/core/prompts.py` 通用字段表新增 `currency` 行（ISO-4217 三字母码，默认 CNY）；3 段 example JSON（电子发票 / 酒店水单 / 网约车）各加 `"currency": "CNY"` 锚定 LLM 输出。
+- **feat(llm_ocr):** `extract_from_bytes` 出口对缺失的 `currency` 字段 defensive fill `"CNY"`，兼容老 cache（cache key = `sha256(pdf_bytes)`，不含 prompt，prompt 变动不失效 cache）。
+- **feat(postprocess):** 顶层 `_CURRENCY_SYMBOLS` + `currency_symbol()` 查表（CNY→¥ / USD→$ / EUR→€ / GBP→£ / JPY→¥ / HKD→HK$；未知码 `"{CODE} "` fallback）。`print_openclaw_summary` 参数 `ignored_count: int` → `ignored_records: list[dict] | None`；新增 `_ignored_summary()` helper；IGNORED 行换成 2 行"总金额 + 主 sender + 回复 CTA"。多币种用 `/` 分隔、字母序。`top_domain == "未知发件人"` 时省 CTA 行。
+- **feat(report):** `write_report_md` §已忽略 渲染从硬编 `¥` 前缀切 `currency_symbol()`，USD 账单现在正确显示 `$10.00`。
+- **feat(contract):** `main()` 两个 `print_openclaw_summary` 调用前加守门分支 —— `not args.supplemental and missing_status == "run_supplemental"` → `sys.stderr.write("AGENT_HINT: run_supplemental ...\nREMEDIATION: ...\n")` + `sys.exit(EXIT_PARTIAL)`。不发哨兵不发附件。补搜这次仍发哨兵（防 max_iterations 用户沉默）。exit 5 复用，不加 exit 6 —— 子语义差异由 stderr 哨兵表达。`REMEDIATION:` 与 `AGENT_HINT:` 成对出现，保障 CLAUDE.md 既有 "每次非零退出必有 REMEDIATION:" 合约不破。
+- **docs(SKILL):** §Exit Codes exit=5 行注解扩充；§Agent Playbook 加守则 0（sentinel absence is valid）；§Invariants 松绑成 "at most once, may be zero"；§Loop Playbook 追加 v5.8 note；新增 §User Reply Conventions 规范 "加 `<domain>`" 回复落地。
+
+### Agent 合约变化
+
+- **`missing.json` schema 不动**（仍 1.0，不加 `ignored_count` 顶层）。
+- **`CHAT_MESSAGE_*` / `CHAT_ATTACHMENTS:` 可以为零**（新增情境：初运行 `run_supplemental` 延迟）。Agents 必须先检查 sentinel 存在性再决定是否转发。
+- **新 stderr 哨兵 `AGENT_HINT: run_supplemental ...`**：出现时 Skill stdout 为空，Agent 按该行指令继续，不向用户转发任何东西。仍伴随 `REMEDIATION: ...`，兼容 pre-v5.8 Agent 的 `REMEDIATION:` 模式匹配。
+- **新用户回复约定**：`加 <domain>` → Agent 写 `learned_exclusions.json`，Skill 不碰。
+
+### 不要再做
+
+- **不要** 在 §IGNORED 渲染里硬编 `¥` 前缀——永远通过 `currency_symbol()` 查表。未来加新币种（KRW/TWD/AUD/...）只需改 `_CURRENCY_SYMBOLS` dict。
+- **不要** 在 `_ignored_summary` 里按金额排序主 sender —— "主要来自" 是按记录条数，不是按金额（同金额大小的 10 张 vs 1 张，大部分用户直觉选 10 张）。
+- **不要** 为 `run_supplemental` 静默分支新建 exit code 6。现有 exit 5 + stderr `AGENT_HINT:` 区分子语义已经够；新 exit code 会破坏 Agent 已有的 exit 表匹配逻辑。
+- **不要** 在 Skill 里加 "占位消息" 逻辑（"正在补搜..."）。静默期间的 UX 兜底属 Agent 职责，SKILL.md §Loop Playbook 建议但不强制。
+- **不要** 让 Skill 自动写 `learned_exclusions.json`。保持 Skill 纯函数语义，可重放；用户决策面的文件只归 Agent。
 
 ### 🟢 v5.7 — IGNORED 白名单分类 + 非报销票据过滤（双层防御）
 
