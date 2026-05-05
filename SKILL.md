@@ -7,7 +7,7 @@ icon: "🧾"
 
 > **Skill target**: This Skill is invoked by **OpenClaw Agents**, not by end users directly. The non-standard frontmatter keys (`display_name`, `icon`) are OpenClaw runtime extensions — they are **not** part of the Anthropic Skill spec and do nothing in a plain Claude Code / Claude.ai context. The agent-facing contract — exit codes, `REMEDIATION:` stderr lines, `missing.json` schema v1.0 — is documented in § Exit Codes and § Loop Playbook below.
 
-# Gmail Invoice Downloader (v5.8)
+# Gmail Invoice Downloader (v5.9)
 
 搜索 Gmail 中用户指定日期范围内的发票/收据/水单/行程单，用 LLM OCR 提取销售方/日期/金额，按 P1 remark / P2 日期+金额 / P3 同日兜底 三层规则配对酒店水单↔住宿发票、按金额 0.01 容差配对网约车发票↔行程单，输出 `下载报告.md` + `发票汇总.csv` + `发票打包_YYYYMMDD-HHMMSS.zip`。
 
@@ -601,13 +601,21 @@ After each Skill run:
 
 1. Scan stdout for `CHAT_MESSAGE_START` and `CHAT_MESSAGE_END` lines.
 2. Forward the content **between** those two lines to the user **verbatim** — do not add, remove, translate, summarize, or cherry-pick. Preserve all emoji, Chinese text, blank lines, and the tail invite.
-3. If the stdout also contains `CHAT_ATTACHMENTS: {...}`, parse the JSON and, **in order**, upload each `file.path` as an attachment to the current chat using the channel's native message tool. Use `file.caption` as the attachment label/caption.
-   - 飞书 channel: use the message tool's file-upload capability.
-   - Slack / Discord / WhatsApp / iMessage / other IM: use the equivalent message tool in the Agent's tool set.
-   - If the current channel's message tool does **not** support file attachments (e.g., plain SMS): skip the upload and include the absolute path in the forwarded text instead.
-4. If a single upload fails, **do not abort**. Append one warning line to the same reply:
+3. If the stdout also contains `CHAT_ATTACHMENTS: {...}`, parse the JSON and, **in order**, send each file as a **native message attachment** via OpenClaw's unified message primitive (`openclaw message send --media <path>` or the equivalent `message` tool call with a `media` field). Pass `file.path` as the media and `file.caption` as the caption. OpenClaw's Gateway routes to the destination channel (飞书 / Lark / Slack / Telegram / Discord / WhatsApp / iMessage-bridge / 企业微信 / WebUI) — the Agent MUST NOT choose channel-specific APIs or reason about per-channel attachment semantics.
+
+   **Do NOT** paste the file path into the reply text. In particular, do NOT emit lines like:
    ```
-   ⚠️ {filename} 上传失败（{reason}），请从 {abs_path} 取
+   📎 /home/ubuntu/.openclaw/media/outbound/发票汇总---<uuid>.csv
+   ```
+   Paths in `CHAT_ATTACHMENTS` — and any `~/.openclaw/media/outbound/...` staging paths surfaced by the runtime — are inputs to the media primitive, not content for the user. The user must receive a clickable file bubble, not a path string.
+
+   The only exception is channels that genuinely cannot carry attachments (plain SMS). In that single case, skip the media call and append one line per file to the forwarded summary:
+   ```
+   ⚠️ 本 channel 不支持附件，请从 {abs_path} 取 {caption}
+   ```
+4. If a single `message send --media` call fails, **do not abort**. Append one warning line to the same reply:
+   ```
+   ⚠️ {filename} 发送失败（{reason}），请从 {abs_path} 取
    ```
    Then continue with the next file.
 5. If `CHAT_MESSAGE_START` / `CHAT_MESSAGE_END` are absent (early-error path), follow the `REMEDIATION:` stderr line as documented in § Exit Codes. Do not attempt attachments.
@@ -784,6 +792,18 @@ python3 scripts/probe-platform.py "https://新平台.com/xxx"
 - 同步 `~/reimbursement-helper/backend/agent/utils/` 时覆盖本地改动。注意 `scripts/core/__init__.py` 的 Modifications from source 清单和本条 Lessons Learned。
 
 **验证工具**：`scripts/dev/replay_classify.py` committed 供 regression check——扫 `~/.cache/gmail-invoice-downloader/ocr/*.json` 跑旧 / 新 classify 差集，附带 sha256→pdf_path 反查。差集含合法水单 → 固化到 `tests/fixtures/ocr/legitimate_folios/*.json` + 扩 `TestHotelFolioNarrowGate` 锁定。差集含 SaaS（Termius / Anthropic / OpenRouter）→ 预期效果，接受。
+
+### 🟢 v5.9 — Agent 把 staging 路径当文本发给用户的回归
+
+**问题**：2026 Q1 使用中发现 OpenClaw Agent 在飞书 channel 给用户回复时，把交付物发成了一行形如 `📎 /home/ubuntu/.openclaw/media/outbound/发票汇总---<uuid>.csv` 的文本，而不是原生 message 附件（可点击的文件 bubble）。用户收到的是一段无法直接下载的路径字符串，且路径里还带 OpenClaw 运行时的 staging UUID —— 观感像 bug（实际上是 Agent 侧选错了姿势，Skill 这边只在文档层加防护栏）。
+
+**根因**：§Agent Playbook 步骤 3 的原文按 channel 枚举（"飞书用 message file-upload / Slack/Discord/... 用对应工具"），给 Agent 留了自行推理 channel 细节的空间。当 Agent 在"挑一个合适的 channel API"时偏向了内部 staging 目录引用，而不是调 OpenClaw 的统一原语 `message send --media`。`~/.openclaw/media/outbound/` 在 OpenClaw 官方文档里没有公开定义，Agent 会把它当成"可以文本引用"的 URL 形态。
+
+**v5.9 解决**：§Agent Playbook 步骤 3 整段重写 —— 明确"永远调用 OpenClaw 的统一 `message send --media` 原语，Gateway 负责路由到 channel；Agent 不要对 channel 细节做推理"。加反面示例（`📎 /home/ubuntu/.openclaw/media/outbound/...` 原型）。显式说明 `CHAT_ATTACHMENTS` 里的 path 是原语的输入、不是用户看到的内容。唯一例外是 SMS（无 MMS）走纯文本降级。步骤 4 的"{filename} 上传失败"措辞同步改成"{filename} 发送失败"，与步骤 3 的新术语一致。
+
+**不改的**：`CHAT_ATTACHMENTS:` JSON schema 不变（path + caption 已经够用 —— 把约束表达在 Agent Playbook 的 prose 里更轻，比再加 schema 字段更合适）；无 Python 改动；`test_agent_contract.py::TestChatSentinelContract` 的契约文本不变。
+
+**教训**：跨 channel 的交付契约，**枚举 channel = 给 Agent 留推理空间**。如果运行时已经提供统一原语（OpenClaw 的 `message send --media`），文档就应该坚定指向它、禁止 Agent 自行选择路径。具体反面示例（整段 `📎 /path/...` 原型）比抽象规则更能防复现。
 
 ### 🔴 12306 支付通知邮件无附件
 
