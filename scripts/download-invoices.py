@@ -686,7 +686,6 @@ def write_report_md(
     meals = matching_result.get("meal", [])
     if meals:
         lines.append(f"## 🍽️ 餐饮发票（{len(meals)} 张，按商户聚合）\n")
-        lines.append("餐饮发票不自动关联酒店入住（开票日可能合并多天就餐）。\n")
         by_m = defaultdict(list)
         for inv in meals:
             v = (inv.get("ocr") or {}).get("vendorName") or inv.get("merchant", "?")

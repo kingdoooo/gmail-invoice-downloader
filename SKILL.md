@@ -563,13 +563,13 @@ Two bare anchor lines (no colon, no payload) wrap the full human-readable summar
 
 ```
 CHAT_MESSAGE_START
-📄 发票报销包 — 2025/04/01 → 2025/07/01
+### 发票下载简报 — 2025/04/01 → 2025/07/01
 
-✅ 共 63 份凭证，合计 ¥48231.00
+✅ 共 63 份票据，合计 ¥48231.00
   ...(summary body)...
 
-💡 发现不该报销的（SaaS 订阅 / 个人账单 / 营销邮件）？
-   直接在聊天里告诉我，我会加到 learned_exclusions.json，下次自动排除。
+📭 已忽略 4 张非报销票据（¥60.00，主要来自 mail.anthropic.com）
+   需要加过滤规则吗？直接告诉我 "加 mail.anthropic.com 到 learned_exclusions.json"，下次自动排除。
 CHAT_MESSAGE_END
 ```
 
@@ -642,7 +642,7 @@ Some Skill messages invite the user to reply with a short command. The Agent, no
 When the Skill summary contains a line like:
 
 ```
-   加过滤规则？回复 "加 <domain>" 我帮你写进 learned_exclusions.json
+   需要加过滤规则吗？直接告诉我 "加 <domain> 到 learned_exclusions.json"，下次自动排除。
 ```
 
 and the user replies with `加 <domain>`:

@@ -774,11 +774,11 @@ class TestSummaryCSV:
         cells = header.split(",")
         assert len(cells) == 9
         assert cells[6] == "主文件"
-        assert cells[7] == "配对凭证"
+        assert cells[7] == "配对票据"
         assert cells[8] == "数据可信度"
 
     def test_hotel_pair_inline_paired_kind(self, tmp_path):
-        """HOTEL merged row: 配对凭证 = '水单: <folio_basename>'."""
+        """HOTEL merged row: 配对票据 = '水单: <folio_basename>'."""
         csv_path = tmp_path / "summary.csv"
         records = [
             {"path": "/p/inv.pdf", "valid": True, "category": "HOTEL_INVOICE",
@@ -2860,8 +2860,8 @@ class TestPrintOpenClawSummary:
             missing_status="stop", date_range=("2026/04/01", "2026/04/30"),
         )
         text = "\n".join(lines)
-        assert "📄 发票报销包" in text
-        assert "共 2 份凭证" in text
+        assert "### 发票下载简报" in text
+        assert "共 2 份票据" in text
         assert "¥400.00" in text
 
     def test_stop_status_says_can_submit(self, tmp_path):
@@ -2930,13 +2930,19 @@ class TestPrintOpenClawSummary:
 
     def test_invite_present_in_non_empty_template(self, tmp_path):
         agg = self._populated_agg()
+        ignored = [
+            {"sender_email": "billing@termius.com",
+             "ocr": {"transactionAmount": 10.0}},
+        ]
         lines = self._capture(
             aggregation=agg, **self._default_paths(tmp_path),
             missing_status="stop", date_range=("2026/04/01", "2026/04/30"),
+            ignored_records=ignored,
         )
         text = "\n".join(lines)
-        assert "💡 发现不该报销的" in text
-        assert "learned_exclusions.json，下次自动排除" in text
+        assert "需要加过滤规则吗" in text
+        assert "learned_exclusions.json" in text
+        assert "下次自动排除" in text
 
     def test_invite_absent_in_empty_template(self, tmp_path):
         matching = do_all_matching([])
@@ -2982,7 +2988,7 @@ class TestPrintOpenClawSummary:
         text = "\n".join(lines)
         # UNPARSED rows exist → non-empty template, not R16b
         assert "本次未下载到凭证" not in text
-        assert "📄 发票报销包" in text
+        assert "### 发票下载简报" in text
 
     def test_low_conf_footnote_when_present(self, tmp_path):
         recs = [
@@ -3109,16 +3115,22 @@ class TestPrintOpenClawSummary:
 
     def test_chat_message_boundary_includes_exclusions_invite(self, tmp_path):
         agg = self._populated_agg()
+        ignored = [
+            {"sender_email": "billing@termius.com",
+             "ocr": {"transactionAmount": 10.0}},
+        ]
         lines = self._capture(
             aggregation=agg, **self._default_paths(tmp_path),
             missing_status="stop", date_range=("2026/04/01", "2026/04/30"),
+            ignored_records=ignored,
         )
         start = lines.index("CHAT_MESSAGE_START")
         end = lines.index("CHAT_MESSAGE_END")
         inner = "\n".join(lines[start + 1:end])
         # Both invite lines live inside the boundary
-        assert "💡 发现不该报销的" in inner
-        assert "learned_exclusions.json，下次自动排除" in inner
+        assert "需要加过滤规则吗" in inner
+        assert "learned_exclusions.json" in inner
+        assert "下次自动排除" in inner
 
     # -- CHAT_ATTACHMENTS JSON sentinel (v5.6) ---------------------------
 

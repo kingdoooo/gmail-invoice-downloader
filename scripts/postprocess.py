@@ -1247,12 +1247,12 @@ def print_openclaw_summary(
     dagger = " †" if low["count"] > 0 else ""
 
     # 1. Title
-    writer(f"📄 发票报销包 — {date_range[0]} → {date_range[1]}")
+    writer(f"### 发票下载简报 — {date_range[0]} → {date_range[1]}")
     # 2. Blank
-    writer("")
+    writer("\u200b")
     # 3. Grand total
     writer(
-        f"✅ 共 {voucher_count} 份凭证，合计 "
+        f"✅ 共 {voucher_count} 份票据，合计 "
         f"¥{aggregation['grand_total']:.2f}{dagger}"
     )
     # 4. Per-category breakdown (only categories with rows)
@@ -1270,7 +1270,7 @@ def print_openclaw_summary(
             # No amount (UNPARSED or None-amount rows) → warn instead
             writer(f"  • ⚠️ {label} {count} 份 — 需人工核查")
     # 5. Blank
-    writer("")
+    writer("\u200b")
     # 6. Unmatched warnings (only N>0)
     if unmatched["hotel_invoices"] > 0:
         writer(f"⚠️ {unmatched['hotel_invoices']} 张酒店发票无对应水单")
@@ -1287,7 +1287,7 @@ def print_openclaw_summary(
             f"¥{low['amount']:.2f}），请人工复核"
         )
     # 8. Blank
-    writer("")
+    writer("\u200b")
     # 9. Next action
     abs_md = os.path.abspath(md_path)
     if missing_status == "stop":
@@ -1317,8 +1317,7 @@ def print_openclaw_summary(
                 f"（{total_str}，主要来自 {top_domain}）"
             )
             writer(
-                f'   加过滤规则？回复 "加 {top_domain}" '
-                f"我帮你写进 learned_exclusions.json"
+                f'   需要加过滤规则吗？直接告诉我 "加 {top_domain} 到 learned_exclusions.json"，下次自动排除。'
             )
         else:
             writer(
@@ -1326,18 +1325,17 @@ def print_openclaw_summary(
                 f"（{total_str}）"
             )
     # 10. Blank
-    writer("")
+    writer("\u200b")
     # 11. Deliverables
     abs_csv = os.path.abspath(csv_path)
     if zip_path is None:
-        writer("📦 报销包：未生成（打包失败，见 run.log 末尾）")
+        writer("📦 发票压缩包：未生成（打包失败，见 run.log 末尾）")
     else:
         abs_zip = os.path.abspath(zip_path)
-        writer(f"📦 报销包（提交这个）: {abs_zip}")
-    writer(f"  明细: {abs_csv}   |   报告: {abs_md}")
-    writer("")
-    writer("💡 发现不该报销的（SaaS 订阅 / 个人账单 / 营销邮件）？")
-    writer("   直接在聊天里告诉我，我会加到 learned_exclusions.json，下次自动排除。")
+        writer(f"📦 发票压缩包: {abs_zip}")
+    writer(f"  发票明细: {abs_csv}")
+    writer(f"  下载报告: {abs_md}")
+    writer("\u200b")
     writer(CHAT_MESSAGE_END_SENTINEL)
 
     # Agent contract: declare deliverables for the current chat. Order is
@@ -1371,7 +1369,7 @@ def print_openclaw_summary(
 
 CSV_COLUMNS = [
     "序号", "开票日期", "类别", "金额", "销售方",
-    "备注", "主文件", "配对凭证", "数据可信度",
+    "备注", "主文件", "配对票据", "数据可信度",
 ]
 
 
@@ -1379,7 +1377,7 @@ def write_summary_csv(path: str, aggregation: Dict[str, Any]) -> int:
     """Write 发票汇总.csv (UTF-8 BOM, Excel-compatible) from aggregation dict.
 
     Layout:
-    - 9 columns (see CSV_COLUMNS): adds 主文件/配对凭证 split + moves to 9th col.
+    - 9 columns (see CSV_COLUMNS): adds 主文件/配对票据 split + moves to 9th col.
     - Detail rows sorted by (CATEGORY_ORDER, date) — category first.
     - Blank separator row, then one 小计 row per category (only categories that
       have a subtotal), then a 总计 row.
